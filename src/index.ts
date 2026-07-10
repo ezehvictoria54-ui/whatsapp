@@ -1,6 +1,7 @@
 import { config } from './config.js';
 import { log } from './logger.js';
 import { migrate } from './db/migrate.js';
+import { seedDatabase } from './db/seed.js';
 import { buildServer } from './server.js';
 import { startWorker, stopWorker } from './worker/worker.js';
 import { closePool } from './db/pool.js';
@@ -12,6 +13,14 @@ import { closePool } from './db/pool.js';
  */
 async function main() {
   await migrate();
+
+  // One-switch demo data: set SEED_ON_BOOT=true in the Railway dashboard to
+  // populate the dashboard, then remove the variable. Idempotent + never touches
+  // real leads, so it's safe if left on, but off by default.
+  if (config.app.seedOnBoot) {
+    log.info('SEED_ON_BOOT enabled — inserting demo data');
+    await seedDatabase();
+  }
 
   const app = await buildServer();
   await app.listen({ host: '0.0.0.0', port: config.app.port });
