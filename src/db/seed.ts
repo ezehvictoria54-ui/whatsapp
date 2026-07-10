@@ -201,7 +201,7 @@ const LEADS: SeedLead[] = [
   },
 ];
 
-async function seed() {
+export async function seedDatabase(): Promise<void> {
   const waIds = LEADS.map((l) => l.wa_id);
 
   // Idempotency: remove any prior seed rows (children cascade on lead delete).
@@ -267,10 +267,14 @@ async function seed() {
   });
 }
 
-seed()
-  .then(() => pool.end())
-  .then(() => process.exit(0))
-  .catch((err) => {
-    log.error('seed failed', { error: (err as Error).message });
-    process.exit(1);
-  });
+// CLI entrypoint: `npm run seed` runs this file directly. When seed.ts is merely
+// imported (e.g. by the app's optional seed-on-boot hook), this block is skipped.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  seedDatabase()
+    .then(() => pool.end())
+    .then(() => process.exit(0))
+    .catch((err) => {
+      log.error('seed failed', { error: (err as Error).message });
+      process.exit(1);
+    });
+}
