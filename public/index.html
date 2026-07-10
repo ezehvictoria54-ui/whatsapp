@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>WhatsApp Lead Engine — Dashboard</title>
+<style>
+  :root {
+    --bg: #0b141a; --panel: #111b21; --panel2: #1f2c33; --line: #2a3942;
+    --text: #e9edef; --muted: #8696a0; --accent: #00a884;
+    --new: #53bdeb; --engaged: #ffb02e; --paid: #00a884; --optout: #ea6b6b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--line);
+           display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  header .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card .n { font-size: 26px; font-weight: 700; }
+  .card .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
+  .card.warn .n { color: var(--optout); }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin: 24px 0 12px; flex-wrap: wrap; }
+  select, button, input { background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+           border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: .4px; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--panel2); }
+  .badge { padding: 2px 9px; border-radius: 20px; font-size: 11px; font-weight: 600; }
+  .badge.NEW { background: rgba(83,189,235,.15); color: var(--new); }
+  .badge.ENGAGED { background: rgba(255,176,46,.15); color: var(--engaged); }
+  .badge.PAID { background: rgba(0,168,132,.18); color: var(--paid); }
+  .badge.OPTED_OUT { background: rgba(234,107,107,.15); color: var(--optout); }
+  .muted { color: var(--muted); }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+             align-items: center; justify-content: center; padding: 20px; }
+  .overlay.open { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+           width: 640px; max-width: 100%; max-height: 88vh; overflow: auto; }
+  .modal header { position: sticky; top: 0; background: var(--panel); }
+  .modal .body { padding: 20px; }
+  .thread { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 20px; }
+  .bubble { max-width: 78%; padding: 8px 11px; border-radius: 10px; font-size: 13px; white-space: pre-wrap; }
+  .bubble.IN { align-self: flex-start; background: var(--panel2); }
+  .bubble.OUT { align-self: flex-end; background: #005c4b; }
+  .bubble .meta { display: block; font-size: 10px; color: var(--muted); margin-top: 3px; }
+  h3 { margin: 18px 0 8px; font-size: 13px; text-transform: uppercase; color: var(--muted); letter-spacing: .4px; }
+  .close { margin-left: auto; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  .fu { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <h1>WhatsApp Lead Engine</h1>
+  <span class="muted" id="dryrun"></span>
+  <button class="close" style="margin-left:auto" onclick="refresh()">↻ Refresh</button>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+
+  <div class="toolbar">
+    <label class="muted">Status
+      <select id="fStatus" onchange="loadLeads()">
+        <option value="">All</option>
+        <option value="NEW">New</option>
+        <option value="ENGAGED">Engaged</option>
+        <option value="PAID">Paid</option>
+        <option value="OPTED_OUT">Opted-out</option>
+      </select>
+    </label>
+    <label class="muted">Source
+      <select id="fSource" onchange="loadLeads()"><option value="">All</option></select>
+    </label>
+  </div>
+
+  <table>
+    <thead><tr>
+      <th>Name</th><th>WhatsApp</th><th>Status</th><th>Source</th><th>Step</th><th>Msgs</th><th>Last activity</th>
+    </tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="emptyLeads" class="empty" style="display:none">No leads yet.</div>
+</main>
+
+<div class="overlay" id="overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <header><h1 id="mTitle">Lead</h1><button class="close" onclick="closeModal()">✕</button></header>
+    <div class="body" id="mBody"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (t) => t ? new Date(t).toLocaleString() : '—';
+const esc = (s) => (s ?? '').replace(/[&<>]/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;' }[c]));
+
+async function j(url, opts) { const r = await fetch(url, opts); return r.json(); }
+
+async function loadStats() {
+  const s = await j('/api/stats');
+  const c = s.counts || {};
+  const rate = (s.optOutRate7d * 100).toFixed(1);
+  const send = s.sending || {};
+  $('cards').innerHTML = [
+    ['Leads today', c.leads_today],
+    ['Replies today', c.replies_today],
+    ['Conversions today', c.conversions_today],
+    ['Opt-out rate (7d)', rate + '%', s.optOutRate7d >= 0.04],
+    ['Engaged', c.engaged_count],
+    ['Paid', c.paid_count],
+    ['Sent today / cap', (send.sentToday ?? 0) + ' / ' + (send.effectiveCap ?? 0), send.paused],
+  ].map(([l, n, warn]) =>
+    `<div class="card ${warn ? 'warn' : ''}"><div class="n">${n ?? 0}</div><div class="l">${l}</div></div>`
+  ).join('');
+  $('dryrun').textContent = send.paused ? '• SENDING PAUSED (quality)' : '';
+}
+
+async function loadSources() {
+  const s = await j('/api/sources');
+  const sel = $('fSource');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">All</option>' +
+    (s.sources || []).map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+  sel.value = cur;
+}
+
+async function loadLeads() {
+  const status = $('fStatus').value, source = $('fSource').value;
+  const q = new URLSearchParams(); if (status) q.set('status', status); if (source) q.set('source', source);
+  const s = await j('/api/leads?' + q.toString());
+  const rows = s.leads || [];
+  $('emptyLeads').style.display = rows.length ? 'none' : 'block';
+  $('rows').innerHTML = rows.map((l) => `
+    <tr onclick="openLead('${l.id}')">
+      <td>${esc(l.name) || '<span class="muted">—</span>'}</td>
+      <td class="muted">${esc(l.wa_id)}</td>
+      <td><span class="badge ${l.status}">${l.status}</span></td>
+      <td class="muted">${esc(l.source) || '—'}</td>
+      <td>${l.sequence_step}</td>
+      <td>${l.message_count}</td>
+      <td class="muted">${fmt(l.last_activity)}</td>
+    </tr>`).join('');
+}
+
+async function openLead(id) {
+  const d = await j('/api/leads/' + id);
+  const l = d.lead;
+  $('mTitle').textContent = (l.name || l.wa_id);
+  const thread = (d.messages || []).map((m) =>
+    `<div class="bubble ${m.direction}">${esc(m.body) || '<i>['+m.type+']</i>'}
+      <span class="meta">${m.direction} · ${fmt(m.created_at)}</span></div>`).join('');
+  const fus = (d.followups || []).map((f) =>
+    `<div class="fu"><span>Step ${f.step} · ${f.channel}${f.template_name ? ' ('+esc(f.template_name)+')' : ''}</span>
+      <span class="muted">${f.status} · ${fmt(f.send_at)}</span></div>`).join('') || '<span class="muted">None</span>';
+  const pays = (d.payments || []).map((p) =>
+    `<div class="fu"><span>${esc(p.provider)} · ${esc(p.reference)}</span>
+      <span class="muted">₦${((p.amount||0)/100).toLocaleString()}</span></div>`).join('') || '<span class="muted">None</span>';
+  $('mBody').innerHTML = `
+    <div class="muted">${esc(l.wa_id)} · <span class="badge ${l.status}">${l.status}</span>
+      · entry: ${l.entry_point} · window ${d.windowOpen ? 'OPEN' : 'closed'}</div>
+    <h3>Thread</h3><div class="thread">${thread || '<span class="muted">No messages</span>'}</div>
+    <h3>Scheduled follow-ups</h3>${fus}
+    <h3>Payments</h3>${pays}`;
+  $('overlay').classList.add('open');
+}
+function closeModal() { $('overlay').classList.remove('open'); }
+
+function refresh() { loadStats(); loadSources(); loadLeads(); }
+refresh();
+setInterval(loadStats, 15000);
+</script>
+</body>
+</html>
