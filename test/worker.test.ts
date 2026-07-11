@@ -11,6 +11,7 @@ function fu(partial: Partial<Followup>): Followup {
     step: 1,
     channel: 'FREEFORM',
     template_name: null,
+    body: null,
     status: 'PENDING',
     created_at: new Date().toISOString(),
     ...partial,

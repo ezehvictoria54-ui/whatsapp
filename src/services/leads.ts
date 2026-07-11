@@ -19,6 +19,10 @@ export interface UpsertInboundInput {
   entryPoint: EntryPoint;
   source: string | null;
   at?: Date;
+  /** offer to tag a *new* lead with (ignored for existing leads) */
+  offerId?: string | null;
+  /** whether the new lead matched no keyword and fell back to the default offer */
+  offerUnmatched?: boolean;
 }
 
 export interface UpsertResult {
@@ -48,11 +52,13 @@ export async function upsertLeadOnInbound(
   // an existing ad lead keeps its 72h window even on a later organic inbound.
   // `entry_point` only ever upgrades organic → ad, never the reverse.
   const res = await db.query<Lead & { xmax_is_new: boolean }>(
-    `INSERT INTO leads (wa_id, name, source, entry_point, status, window_expires_at)
+    `INSERT INTO leads (wa_id, name, source, entry_point, status, window_expires_at,
+                        offer_id, offer_unmatched)
      VALUES ($1, $2, $3, $4, 'NEW',
              $5::timestamptz + (CASE WHEN $4 = 'ad'
                                      THEN interval '72 hours'
-                                     ELSE interval '24 hours' END))
+                                     ELSE interval '24 hours' END),
+             $6, $7)
      ON CONFLICT (wa_id) DO UPDATE SET
        name              = COALESCE(EXCLUDED.name, leads.name),
        source            = COALESCE(leads.source, EXCLUDED.source),
@@ -61,9 +67,11 @@ export async function upsertLeadOnInbound(
          CASE WHEN (CASE WHEN EXCLUDED.entry_point = 'ad' THEN 'ad' ELSE leads.entry_point END) = 'ad'
               THEN interval '72 hours'
               ELSE interval '24 hours' END),
+       -- keep the existing offer; only fill it if this lead somehow had none
+       offer_id          = COALESCE(leads.offer_id, EXCLUDED.offer_id),
        updated_at        = now()
      RETURNING *, (xmax = 0) AS xmax_is_new`,
-    [input.waId, input.name, input.source, input.entryPoint, at],
+    [input.waId, input.name, input.source, input.entryPoint, at, input.offerId ?? null, input.offerUnmatched ?? false],
   );
 
   const row = res.rows[0]!;
@@ -102,4 +110,30 @@ export async function advanceSequenceStep(
      WHERE id = $1`,
     [leadId, step],
   );
+}
+
+/** Manually (re)assign a lead to an offer and clear the unmatched flag. */
+export async function assignOffer(
+  leadId: string,
+  offerId: string,
+  db: Db = { query },
+): Promise<void> {
+  await db.query(
+    `UPDATE leads SET offer_id = $2, offer_unmatched = false, updated_at = now() WHERE id = $1`,
+    [leadId, offerId],
+  );
+}
+
+/**
+ * Move a lead into the PAYMENT_CLAIMED review state (Feature B). Only from a
+ * non-terminal, not-already-claimed state, so re-sending "paid" is a no-op.
+ * Returns true if this call performed the transition.
+ */
+export async function markPaymentClaimed(leadId: string, db: Db = { query }): Promise<boolean> {
+  const res = await db.query(
+    `UPDATE leads SET status = 'PAYMENT_CLAIMED', payment_claimed_at = now(), updated_at = now()
+     WHERE id = $1 AND status IN ('NEW','ENGAGED')`,
+    [leadId],
+  );
+  return (res.rowCount ?? 0) > 0;
 }

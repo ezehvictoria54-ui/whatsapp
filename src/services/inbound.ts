@@ -1,4 +1,4 @@
-import type { ParsedInbound, EntryPoint } from '../types.js';
+import type { ParsedInbound, EntryPoint, Offer } from '../types.js';
 import { log } from '../logger.js';
 import { config } from '../config.js';
 import { messageExists, logMessage } from './messages.js';
@@ -9,15 +9,26 @@ import {
 } from './leads.js';
 import { scheduleSequence, cancelPendingFollowups } from './followups.js';
 import { isOptOut } from './optout.js';
+import { isPaymentClaim } from './paymentIntent.js';
+import { claimPayment } from './payments.js';
+import { matchOfferByKeyword, getDefaultOffer, offerSequence, canonicalSequence } from './offers.js';
 import { sendFreeformToLead } from './outbound.js';
 import { generateAiReply, ensureOptOut } from '../ai/reply.js';
+import { renderMessage } from '../lib/render.js';
 import { isWindowOpen } from '../lib/window.js';
 
 const OPT_OUT_CONFIRMATION =
   "You're unsubscribed and won't get further messages from us. " +
   'Thanks — reply anytime if you change your mind.';
 
-function fixedWelcome(name: string | null): string {
+/** Welcome copy: the offer's step-0 body (rendered), else a generic fallback. */
+function welcomeFor(offer: Offer | null, name: string | null): string {
+  const step0 = offer ? offerSequence(offer).find((s) => s.step === 0) : undefined;
+  if (step0?.freeformBody) {
+    return ensureOptOut(
+      renderMessage(step0.freeformBody, { name, offerName: offer?.name, priceKobo: offer?.price_kobo }),
+    );
+  }
   const greeting = name ? `Hi ${name.split(' ')[0]}! ` : 'Hi there! ';
   return ensureOptOut(
     `${greeting}Thanks for reaching out 🙌 Tell me what you're looking for and I'll help you sort it out right away.`,
@@ -31,6 +42,9 @@ export interface InboundOutcome {
   optedOut?: boolean;
   replied?: boolean;
   scheduled?: number;
+  offerId?: string | null;
+  offerUnmatched?: boolean;
+  paymentClaimed?: boolean;
 }
 
 /**
@@ -51,6 +65,13 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
   const entryPoint: EntryPoint = parsed.isAd ? 'ad' : 'organic';
   const at = parsed.timestamp ? new Date(parsed.timestamp * 1000) : new Date();
 
+  // Feature A — resolve the offer from the first message's keyword. Unmatched
+  // leads fall under the default offer and are flagged for manual assignment.
+  const matched = await matchOfferByKeyword(parsed.body);
+  const defaultOffer = matched ? null : await getDefaultOffer();
+  const resolvedOffer = matched ?? defaultOffer;
+  const offerUnmatched = !matched;
+
   // Step 4 — upsert lead (window logic lives in the query).
   const { lead, isNew } = await upsertLeadOnInbound({
     waId: parsed.waId,
@@ -58,6 +79,8 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
     entryPoint,
     source: parsed.source,
     at,
+    offerId: resolvedOffer?.id ?? null,
+    offerUnmatched,
   });
 
   // Step 5 — log inbound message. ON CONFLICT means a racing duplicate returns
@@ -91,7 +114,27 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
   // in still gets logged above, but no automated outreach.
   if (lead.status === 'PAID' || lead.status === 'OPTED_OUT') {
     log.debug('inbound from terminal lead, logged only', { leadId: lead.id, status: lead.status });
-    return { duplicate: false, leadId: lead.id, isNewLead: isNew };
+    return { duplicate: false, leadId: lead.id, isNewLead: isNew, offerId: lead.offer_id };
+  }
+
+  // Feature B — payment claim. If the buyer says they paid, move to review and
+  // pause follow-ups; never auto-reply/schedule. Approval is always manual.
+  if (isPaymentClaim(parsed.body)) {
+    const { claimed } = await claimPayment(lead, windowOpen);
+    return {
+      duplicate: false,
+      leadId: lead.id,
+      isNewLead: isNew,
+      offerId: lead.offer_id,
+      offerUnmatched: lead.offer_unmatched,
+      paymentClaimed: claimed,
+    };
+  }
+
+  // A lead already awaiting payment review shouldn't get fresh outreach.
+  if (lead.status === 'PAYMENT_CLAIMED') {
+    log.debug('inbound from lead under payment review, logged only', { leadId: lead.id });
+    return { duplicate: false, leadId: lead.id, isNewLead: isNew, offerId: lead.offer_id };
   }
 
   // Step 7 — instant auto-reply (free-form, inside the window) + ENGAGED.
@@ -99,18 +142,24 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
   let replied = false;
   if (windowOpen) {
     const aiReply = config.ai.enabled ? await generateAiReply(parsed.body, lead.name) : null;
-    const body = aiReply ?? fixedWelcome(lead.name);
+    const body = aiReply ?? welcomeFor(resolvedOffer, lead.name);
     replied = await safeSend(() => sendFreeformToLead(lead.id, lead.wa_id, body));
   } else {
     log.warn('window closed on inbound — skipping instant reply', { leadId: lead.id });
   }
 
-  // Step 8 — schedule the 7-day sequence, only on the first inbound for a lead.
+  // Step 8 — schedule the follow-up sequence (the lead's offer sequence), only
+  // on the first inbound for a lead.
   let scheduled = 0;
   if (isNew) {
     const windowExpiry = lead.window_expires_at ? new Date(lead.window_expires_at) : null;
-    scheduled = await scheduleSequence(lead.id, at, windowExpiry);
-    log.info('scheduled sequence', { leadId: lead.id, scheduled });
+    const steps = resolvedOffer ? offerSequence(resolvedOffer) : canonicalSequence();
+    scheduled = await scheduleSequence(lead.id, at, windowExpiry, steps, {
+      name: lead.name,
+      offerName: resolvedOffer?.name,
+      priceKobo: resolvedOffer?.price_kobo,
+    });
+    log.info('scheduled sequence', { leadId: lead.id, scheduled, offerId: lead.offer_id });
   }
 
   return {
@@ -120,6 +169,8 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
     optedOut: false,
     replied,
     scheduled,
+    offerId: lead.offer_id,
+    offerUnmatched: lead.offer_unmatched,
   };
 }
 

@@ -1,8 +1,11 @@
 import { query, type Queryable } from '../db/pool.js';
-import type { Channel, Followup } from '../types.js';
-import { WORKER_STEPS, type SequenceStep } from '../sequence.js';
+import type { Channel, Followup, OfferSequenceStep } from '../types.js';
+import { renderMessage, type RenderContext } from '../lib/render.js';
 
 type Db = Queryable;
+
+/** Minimal shape resolveChannel needs — satisfied by any sequence step. */
+type ChannelStep = { channel: Channel; templateName?: string };
 
 /**
  * Decide the channel a step should be scheduled on, given when it will fire
@@ -13,7 +16,7 @@ type Db = Queryable;
  *     window is still closed at send time.
  */
 export function resolveChannel(
-  step: SequenceStep,
+  step: ChannelStep,
   sendAt: Date,
   windowExpiresAt: Date | null,
 ): { channel: Channel; templateName: string | null } {
@@ -29,25 +32,32 @@ export function resolveChannel(
 }
 
 /**
- * Insert the 7-day sequence for a lead (§6.4). Idempotent: `ON CONFLICT
- * (lead_id, step) DO NOTHING` guarantees the rows are created once even if the
- * webhook fires twice for the "first" inbound.
+ * Insert the follow-up sequence for a lead using the lead's *offer* sequence
+ * (§Feature A). Step 0 is the instant reply; the worker owns steps ≥ 1. The
+ * per-offer free-form body is rendered (placeholders resolved) and stored on the
+ * row so the worker doesn't need the offer at send time.
+ *
+ * Idempotent: `ON CONFLICT (lead_id, step) DO NOTHING`.
  */
 export async function scheduleSequence(
   leadId: string,
   firstContact: Date,
   windowExpiresAt: Date | null,
+  steps: OfferSequenceStep[],
+  ctx: RenderContext,
   db: Db = { query },
 ): Promise<number> {
   let inserted = 0;
-  for (const step of WORKER_STEPS) {
+  for (const step of steps) {
+    if (step.step < 1) continue; // step 0 is the instant reply, not a worker followup
     const sendAt = new Date(firstContact.getTime() + step.offsetMs);
     const { channel, templateName } = resolveChannel(step, sendAt, windowExpiresAt);
+    const body = step.freeformBody ? renderMessage(step.freeformBody, ctx) : null;
     const res = await db.query(
-      `INSERT INTO followups (lead_id, send_at, step, channel, template_name)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO followups (lead_id, send_at, step, channel, template_name, body)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (lead_id, step) DO NOTHING`,
-      [leadId, sendAt.toISOString(), step.step, channel, templateName],
+      [leadId, sendAt.toISOString(), step.step, channel, templateName, body],
     );
     inserted += res.rowCount ?? 0;
   }

@@ -1,16 +1,62 @@
 import { pool, query } from './pool.js';
 import { log } from '../logger.js';
-import type { Channel, EntryPoint, FollowupStatus, LeadStatus } from '../types.js';
+import type { Channel, EntryPoint, FollowupStatus, LeadStatus, OfferSequenceStep } from '../types.js';
+import { ensureDefaultOffer, canonicalSequence } from '../services/offers.js';
 
 /**
- * Seed ~10 realistic fake leads across every status, each with a short message
- * thread and a couple of scheduled follow-ups (plus a payment for PAID leads).
+ * Seed realistic fake data so the dashboard shows meaningful content:
+ *  - a couple of keyworded offers (plus the default offer),
+ *  - ~12 leads across every status including two "Payment Claimed" leads,
+ *  - a short thread + follow-ups per lead, and payments for PAID leads.
  *
  * Idempotent: it deletes any previously-seeded leads (identified by their
  * `wa_id`, which all share the reserved `234800000xx` prefix) before inserting,
- * so `npm run seed` can be run repeatedly without piling up duplicates. It only
- * ever touches its own seed rows — real leads are left untouched.
+ * and upserts the seed offers by keyword, so `npm run seed` can be run
+ * repeatedly without piling up duplicates. It only ever touches its own rows.
  */
+
+type OfferKey = 'default' | 'glow' | 'fit';
+
+/** Build a per-offer sequence from the canonical one with a custom welcome/CTA. */
+function offerSeq(welcome: string, cta: string): OfferSequenceStep[] {
+  const seq = canonicalSequence();
+  const s0 = seq.find((s) => s.step === 0);
+  const s2 = seq.find((s) => s.step === 2);
+  if (s0) s0.freeformBody = welcome;
+  if (s2) s2.freeformBody = cta;
+  return seq;
+}
+
+interface SeedOffer {
+  key: Exclude<OfferKey, 'default'>;
+  name: string;
+  keyword: string;
+  priceKobo: number;
+  sequence: OfferSequenceStep[];
+}
+
+const SEED_OFFERS: SeedOffer[] = [
+  {
+    key: 'glow',
+    name: 'Glow Skincare Set',
+    keyword: 'glow',
+    priceKobo: 1_250_000, // ₦12,500
+    sequence: offerSeq(
+      'Hi {name}! 🌟 Thanks for your interest in the {offer}. It\'s {price} for the full routine. Want me to set up your order? Reply STOP to opt out anytime.',
+      'Here\'s a before/after from a {offer} customer 👇 Ready to glow? I can set up your order in a minute. Reply STOP to opt out.',
+    ),
+  },
+  {
+    key: 'fit',
+    name: 'FitPro 8-Week Plan',
+    keyword: 'fit',
+    priceKobo: 1_800_000, // ₦18,000
+    sequence: offerSeq(
+      'Hi {name}! 💪 Thanks for asking about the {offer}. It\'s {price} and includes workouts + a meal guide. Want in? Reply STOP to opt out anytime.',
+      'A recent {offer} member lost 6kg in 8 weeks 🔥 Want me to lock in your spot at {price}? Reply STOP to opt out.',
+    ),
+  },
+];
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -40,6 +86,8 @@ interface SeedLead {
   sequence_step: number;
   createdAgoMs: number;
   windowExpiresAtMs: number; // signed offset from now; negative = future
+  offerKey?: OfferKey; // defaults to 'default' (organic, unmatched)
+  claimedAgoMs?: number; // set for PAYMENT_CLAIMED leads
   messages: SeedMessage[];
   followups: SeedFollowup[];
   payment?: { reference: string; amountKobo: number };
@@ -50,7 +98,7 @@ const OPT_OUT_LINE = 'Reply STOP to opt out anytime.';
 const LEADS: SeedLead[] = [
   // ── NEW (2) — just arrived, greeted, sequence pending ──────────────────────
   {
-    wa_id: '2348000000001', name: 'Chidinma Okafor', status: 'NEW', entry_point: 'ad',
+    wa_id: '2348000000001', name: 'Chidinma Okafor', status: 'NEW', entry_point: 'ad', offerKey: 'glow',
     source: 'AD_LAGOS_SKINCARE', sequence_step: 0, createdAgoMs: 20 * 60 * 1000,
     windowExpiresAtMs: -(72 * HOUR - 20 * 60 * 1000),
     messages: [
@@ -78,7 +126,7 @@ const LEADS: SeedLead[] = [
 
   // ── ENGAGED (3) — active conversations, some follow-ups already sent ────────
   {
-    wa_id: '2348000000003', name: 'Aisha Bello', status: 'ENGAGED', entry_point: 'ad',
+    wa_id: '2348000000003', name: 'Aisha Bello', status: 'ENGAGED', entry_point: 'ad', offerKey: 'fit',
     source: 'AD_ABUJA_FITNESS', sequence_step: 2, createdAgoMs: 2 * DAY,
     windowExpiresAtMs: -(72 * HOUR - 2 * DAY),
     messages: [
@@ -95,7 +143,7 @@ const LEADS: SeedLead[] = [
     ],
   },
   {
-    wa_id: '2348000000004', name: 'Tunde Adeyemi', status: 'ENGAGED', entry_point: 'ad',
+    wa_id: '2348000000004', name: 'Tunde Adeyemi', status: 'ENGAGED', entry_point: 'ad', offerKey: 'glow',
     source: 'AD_LAGOS_SKINCARE', sequence_step: 1, createdAgoMs: 5 * HOUR,
     windowExpiresAtMs: -(72 * HOUR - 5 * HOUR),
     messages: [
@@ -126,7 +174,7 @@ const LEADS: SeedLead[] = [
 
   // ── PAID (3) — converted; follow-ups cancelled; payment recorded ────────────
   {
-    wa_id: '2348000000006', name: 'Blessing Okon', status: 'PAID', entry_point: 'ad',
+    wa_id: '2348000000006', name: 'Blessing Okon', status: 'PAID', entry_point: 'ad', offerKey: 'fit',
     source: 'AD_ABUJA_FITNESS', sequence_step: 2, createdAgoMs: 3 * DAY,
     windowExpiresAtMs: -(72 * HOUR - 3 * DAY),
     messages: [
@@ -142,7 +190,7 @@ const LEADS: SeedLead[] = [
     payment: { reference: 'seed_ref_blessing_001', amountKobo: 1_800_000 },
   },
   {
-    wa_id: '2348000000007', name: 'Ibrahim Musa', status: 'PAID', entry_point: 'ad',
+    wa_id: '2348000000007', name: 'Ibrahim Musa', status: 'PAID', entry_point: 'ad', offerKey: 'glow',
     source: 'AD_LAGOS_SKINCARE', sequence_step: 3, createdAgoMs: 4 * DAY,
     windowExpiresAtMs: -(72 * HOUR - 4 * DAY),
     messages: [
@@ -174,7 +222,7 @@ const LEADS: SeedLead[] = [
 
   // ── OPTED_OUT (2) — sent STOP; everything halted ────────────────────────────
   {
-    wa_id: '2348000000009', name: 'Samuel Ojo', status: 'OPTED_OUT', entry_point: 'ad',
+    wa_id: '2348000000009', name: 'Samuel Ojo', status: 'OPTED_OUT', entry_point: 'ad', offerKey: 'fit',
     source: 'AD_ABUJA_FITNESS', sequence_step: 1, createdAgoMs: 2 * DAY,
     windowExpiresAtMs: -(72 * HOUR - 2 * DAY),
     messages: [
@@ -199,6 +247,39 @@ const LEADS: SeedLead[] = [
     ],
     followups: [{ step: 1, channel: 'FREEFORM', status: 'CANCELLED', sendAtMs: -(3 * DAY - 3 * HOUR) }],
   },
+
+  // ── PAYMENT_CLAIMED (2) — buyer says they paid; awaiting manual approval ─────
+  {
+    wa_id: '2348000000011', name: 'Amara Nnamdi', status: 'PAYMENT_CLAIMED', entry_point: 'ad',
+    offerKey: 'glow', source: 'AD_LAGOS_SKINCARE', sequence_step: 2, createdAgoMs: 6 * HOUR,
+    windowExpiresAtMs: -(72 * HOUR - 6 * HOUR), claimedAgoMs: 12 * 60 * 1000,
+    messages: [
+      { direction: 'IN', body: 'glow — I want the skincare set', atMs: 6 * HOUR },
+      { direction: 'OUT', body: `Hi Amara! 🌟 The Glow Skincare Set is ₦12,500. Here are your secure account details. ${OPT_OUT_LINE}`, atMs: 6 * HOUR - 60 * 1000 },
+      { direction: 'IN', body: "I've paid", atMs: 12 * 60 * 1000 },
+      { direction: 'OUT', body: "Thank you! 🙏 We've noted your payment and it's being confirmed. You'll get a confirmation here shortly.", atMs: 12 * 60 * 1000 - 20 * 1000 },
+    ],
+    // Follow-ups stay PENDING (paused) so they resume if the claim is rejected.
+    followups: [
+      { step: 1, channel: 'FREEFORM', status: 'SENT', sendAtMs: 3 * HOUR },
+      { step: 2, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(6 * HOUR) },
+    ],
+  },
+  {
+    wa_id: '2348000000012', name: 'Kunle Balogun', status: 'PAYMENT_CLAIMED', entry_point: 'ad',
+    offerKey: 'fit', source: 'AD_ABUJA_FITNESS', sequence_step: 1, createdAgoMs: 26 * HOUR,
+    windowExpiresAtMs: -(72 * HOUR - 26 * HOUR), claimedAgoMs: 70 * 60 * 1000,
+    messages: [
+      { direction: 'IN', body: 'start fit', atMs: 26 * HOUR },
+      { direction: 'OUT', body: `Hi Kunle! 💪 The FitPro 8-Week Plan is ₦18,000. Want in? ${OPT_OUT_LINE}`, atMs: 26 * HOUR - 60 * 1000 },
+      { direction: 'IN', body: 'done, transferred', atMs: 70 * 60 * 1000 },
+      { direction: 'OUT', body: "Thank you! 🙏 We've noted your payment and it's being confirmed.", atMs: 70 * 60 * 1000 - 20 * 1000 },
+    ],
+    followups: [
+      { step: 1, channel: 'FREEFORM', status: 'SENT', sendAtMs: 23 * HOUR },
+      { step: 2, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(2 * HOUR) },
+    ],
+  },
 ];
 
 export async function seedDatabase(): Promise<void> {
@@ -208,19 +289,41 @@ export async function seedDatabase(): Promise<void> {
   const del = await query('DELETE FROM leads WHERE wa_id = ANY($1::text[])', [waIds]);
   if ((del.rowCount ?? 0) > 0) log.info('cleared previous seed leads', { count: del.rowCount });
 
+  // Offers: ensure the default exists, then upsert the keyworded seed offers.
+  const defaultOffer = await ensureDefaultOffer();
+  const offerIdByKey: Record<OfferKey, string> = { default: defaultOffer.id, glow: '', fit: '' };
+  for (const o of SEED_OFFERS) {
+    const res = await query<{ id: string }>(
+      `INSERT INTO offers (name, price_kobo, keyword, sequence, active)
+       VALUES ($1,$2,$3,$4::jsonb,true)
+       ON CONFLICT (keyword) WHERE keyword IS NOT NULL DO UPDATE SET
+         name = EXCLUDED.name, price_kobo = EXCLUDED.price_kobo,
+         sequence = EXCLUDED.sequence, updated_at = now()
+       RETURNING id`,
+      [o.name, o.priceKobo, o.keyword, JSON.stringify(o.sequence)],
+    );
+    offerIdByKey[o.key] = res.rows[0]!.id;
+  }
+
   let msgCount = 0;
   let fuCount = 0;
   let payCount = 0;
 
   for (const l of LEADS) {
+    const offerKey: OfferKey = l.offerKey ?? 'default';
+    const offerId = offerIdByKey[offerKey];
+    const unmatched = offerKey === 'default';
     const leadRes = await query<{ id: string }>(
       `INSERT INTO leads (wa_id, name, source, status, entry_point, sequence_step,
-                          window_expires_at, created_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+                          window_expires_at, offer_id, offer_unmatched, payment_claimed_at,
+                          created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11)
        RETURNING id`,
       [
         l.wa_id, l.name, l.source, l.status, l.entry_point, l.sequence_step,
         l.windowExpiresAtMs >= 0 ? ago(l.windowExpiresAtMs) : ahead(-l.windowExpiresAtMs),
+        offerId, unmatched,
+        l.claimedAgoMs != null ? ago(l.claimedAgoMs) : null,
         ago(l.createdAgoMs),
       ],
     );
@@ -250,16 +353,17 @@ export async function seedDatabase(): Promise<void> {
 
     if (l.payment) {
       await query(
-        `INSERT INTO payments (lead_id, provider, reference, amount, created_at)
-         VALUES ($1,'paystack',$2,$3,$4)
+        `INSERT INTO payments (lead_id, offer_id, provider, reference, amount, created_at)
+         VALUES ($1,$2,'paystack',$3,$4,$5)
          ON CONFLICT (reference) DO NOTHING`,
-        [leadId, l.payment.reference, l.payment.amountKobo, ago(l.createdAgoMs - 60 * 1000)],
+        [leadId, offerId, l.payment.reference, l.payment.amountKobo, ago(l.createdAgoMs - 60 * 1000)],
       );
       payCount++;
     }
   }
 
   log.info('seed complete', {
+    offers: SEED_OFFERS.length + 1,
     leads: LEADS.length,
     messages: msgCount,
     followups: fuCount,

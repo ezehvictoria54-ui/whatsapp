@@ -24,22 +24,23 @@ interface SendAction {
 
 /**
  * Decide what (if anything) to send for a due followup, re-checking the window
- * at send time (§6.4). A FREEFORM step whose window has closed falls back to its
- * template if it has one, else is skipped.
+ * at send time (§6.4). Prefers the body/template stored on the followup (which
+ * carries the lead's *offer* copy) and falls back to the canonical sequence for
+ * rows created before the offers feature. A FREEFORM step whose window has
+ * closed falls back to its template if it has one, else is skipped.
  */
 export function resolveSendAction(followup: Followup, windowOpen: boolean): SendAction {
   const step = stepByNumber(followup.step);
 
   if (followup.channel === 'FREEFORM') {
     if (windowOpen) {
-      return { kind: 'freeform', body: step?.freeformBody ?? '' };
+      const body = followup.body ?? step?.freeformBody ?? '';
+      return body ? { kind: 'freeform', body } : { kind: 'skip' };
     }
-    if (step?.templateName) {
-      return {
-        kind: 'template',
-        templateName: step.templateName,
-        preview: `[template:${step.templateName}] ${step.purpose}`,
-      };
+    // Window closed since scheduling — use a fallback template if one exists.
+    const fallback = followup.template_name ?? step?.templateName;
+    if (fallback) {
+      return { kind: 'template', templateName: fallback, preview: `[template:${fallback}] ${step?.purpose ?? ''}`.trim() };
     }
     return { kind: 'skip' };
   }
@@ -81,10 +82,16 @@ export async function runTick(now: Date = new Date()): Promise<TickResult> {
   for (const f of batch) {
     const lead = await getLeadById(f.lead_id);
 
-    // Skip PAID / OPTED_OUT / vanished leads — no cap consumed.
+    // Skip PAID / OPTED_OUT / vanished leads — terminal, no cap consumed.
     if (!lead || lead.status === 'PAID' || lead.status === 'OPTED_OUT') {
       await markFollowup(f.id, 'SKIPPED');
       skipped++;
+      continue;
+    }
+
+    // PAYMENT_CLAIMED is a *pause*, not a terminal skip: leave the followup
+    // PENDING so it resumes if the claim is later rejected (§Feature B).
+    if (lead.status === 'PAYMENT_CLAIMED') {
       continue;
     }
 
