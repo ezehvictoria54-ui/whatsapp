@@ -2,6 +2,7 @@ import { config } from './config.js';
 import { log } from './logger.js';
 import { migrate } from './db/migrate.js';
 import { seedDatabase } from './db/seed.js';
+import { ensureDefaultOffer } from './services/offers.js';
 import { buildServer } from './server.js';
 import { startWorker, stopWorker } from './worker/worker.js';
 import { closePool } from './db/pool.js';
@@ -13,6 +14,9 @@ import { closePool } from './db/pool.js';
  */
 async function main() {
   await migrate();
+
+  // Ensure a default offer exists and every lead is attributed to one (§Feature A).
+  await ensureDefaultOffer();
 
   // One-switch demo data: set SEED_ON_BOOT=true in the Railway dashboard to
   // populate the dashboard, then remove the variable. Idempotent + never touches

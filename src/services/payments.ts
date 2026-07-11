@@ -2,8 +2,9 @@ import { query, withTransaction } from '../db/pool.js';
 import { config } from '../config.js';
 import { log } from '../logger.js';
 import type { Lead, Payment } from '../types.js';
-import { getLeadByWaId, getLeadById, setStatus } from './leads.js';
+import { getLeadByWaId, getLeadById, setStatus, markPaymentClaimed } from './leads.js';
 import { cancelPendingFollowups } from './followups.js';
+import { getOffer } from './offers.js';
 import { sendFreeformToLead } from './outbound.js';
 import { createBankTransferCharge, type BankTransferDetails } from '../paystack/client.js';
 
@@ -57,10 +58,10 @@ export async function sendBankTransferPrompt(params: {
   // ever missing. Not a confirmation — the lead is only PAID on charge.success.
   if (details.reference) {
     await query(
-      `INSERT INTO payments (lead_id, provider, reference, amount)
-       VALUES ($1, 'paystack', $2, $3)
+      `INSERT INTO payments (lead_id, offer_id, provider, reference, amount)
+       VALUES ($1, $2, 'paystack', $3, $4)
        ON CONFLICT (reference) DO NOTHING`,
-      [params.lead.id, details.reference, params.amountKobo],
+      [params.lead.id, params.lead.offer_id, details.reference, params.amountKobo],
     );
   }
 
@@ -116,14 +117,16 @@ export async function handleChargeSuccess(evt: ChargeSuccess): Promise<{
   const wasAlreadyPaid = lead.status === 'PAID';
 
   await withTransaction(async (client) => {
-    // Step 4 — insert/patch payment row (dedupe on reference).
+    // Step 4 — insert/patch payment row (dedupe on reference), attributed to the
+    // lead's offer so revenue reporting can break down by offer.
     await client.query(
-      `INSERT INTO payments (lead_id, provider, reference, amount)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO payments (lead_id, offer_id, provider, reference, amount)
+       VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (reference) DO UPDATE SET
-         lead_id = COALESCE(payments.lead_id, EXCLUDED.lead_id),
-         amount  = COALESCE(EXCLUDED.amount, payments.amount)`,
-      [lead!.id, evt.provider ?? 'paystack', evt.reference, evt.amountKobo],
+         lead_id  = COALESCE(payments.lead_id, EXCLUDED.lead_id),
+         offer_id = COALESCE(payments.offer_id, EXCLUDED.offer_id),
+         amount   = COALESCE(EXCLUDED.amount, payments.amount)`,
+      [lead!.id, lead!.offer_id, evt.provider ?? 'paystack', evt.reference, evt.amountKobo],
     );
     // Step 5 — mark PAID + cancel pending follow-ups.
     await setStatus(lead!.id, 'PAID', client);
@@ -141,4 +144,85 @@ export async function handleChargeSuccess(evt: ChargeSuccess): Promise<{
 
   log.info('payment confirmed', { leadId: lead.id, reference: evt.reference, wasAlreadyPaid });
   return { matched: true, leadId: lead.id, alreadyPaid: wasAlreadyPaid };
+}
+
+// ─── Feature B: manual payment-claim flow ──────────────────────────────────────
+
+const CLAIM_ACK =
+  "Thank you! 🙏 We've noted your payment and it's being confirmed. " +
+  "You'll get a confirmation here shortly.";
+
+/**
+ * A buyer said they paid. Move the lead into the PAYMENT_CLAIMED review state and
+ * pause follow-ups (the worker skips PAYMENT_CLAIMED leads without cancelling, so
+ * a rejected claim can resume them). Never marks the lead PAID — approval is
+ * always manual. Sends one acknowledgement. Idempotent per claim.
+ */
+export async function claimPayment(lead: Lead, windowOpen: boolean): Promise<{ claimed: boolean }> {
+  const claimed = await markPaymentClaimed(lead.id);
+  if (!claimed) {
+    log.debug('payment claim ignored (already claimed or terminal)', { leadId: lead.id });
+    return { claimed: false };
+  }
+  if (windowOpen) {
+    try {
+      await sendFreeformToLead(lead.id, lead.wa_id, CLAIM_ACK);
+    } catch (err) {
+      log.error('claim ack send failed', { leadId: lead.id, error: (err as Error).message });
+    }
+  }
+  log.info('payment claimed — awaiting manual approval', { leadId: lead.id });
+  return { claimed: true };
+}
+
+/**
+ * Approve a claimed payment: mark PAID, keep follow-ups cancelled, and record the
+ * offer's price as revenue. Idempotent — a second approval won't double-count.
+ */
+export async function approveClaim(leadId: string): Promise<{ ok: boolean; reason?: string }> {
+  const lead = await getLeadById(leadId);
+  if (!lead) return { ok: false, reason: 'not found' };
+  if (lead.status === 'PAID') return { ok: true }; // already approved
+  if (lead.status !== 'PAYMENT_CLAIMED') return { ok: false, reason: 'lead is not in a claimed state' };
+
+  const offer = lead.offer_id ? await getOffer(lead.offer_id) : null;
+  const amount = offer?.price_kobo ?? null;
+  const reference = `manual_${lead.id}_${Date.now()}`;
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `INSERT INTO payments (lead_id, offer_id, provider, reference, amount, claimed_at)
+       VALUES ($1, $2, 'manual', $3, $4, $5)
+       ON CONFLICT (reference) DO NOTHING`,
+      [lead.id, lead.offer_id, reference, amount, lead.payment_claimed_at],
+    );
+    await setStatus(lead.id, 'PAID', client);
+    await cancelPendingFollowups(lead.id, client);
+    await client.query('UPDATE leads SET payment_claimed_at = NULL WHERE id = $1', [lead.id]);
+  });
+
+  try {
+    await sendFreeformToLead(lead.id, lead.wa_id, receiptCopy());
+  } catch (err) {
+    log.error('receipt send failed', { leadId: lead.id, error: (err as Error).message });
+  }
+  log.info('claim approved', { leadId: lead.id, amount });
+  return { ok: true };
+}
+
+/**
+ * Reject a claimed payment: return the lead to ENGAGED and resume follow-ups
+ * (they were only paused, never cancelled). No revenue recorded.
+ */
+export async function rejectClaim(leadId: string): Promise<{ ok: boolean; reason?: string }> {
+  const lead = await getLeadById(leadId);
+  if (!lead) return { ok: false, reason: 'not found' };
+  if (lead.status !== 'PAYMENT_CLAIMED') return { ok: false, reason: 'lead is not in a claimed state' };
+
+  await query(
+    `UPDATE leads SET status = 'ENGAGED', payment_claimed_at = NULL, updated_at = now() WHERE id = $1`,
+    [lead.id],
+  );
+  log.info('claim rejected — follow-ups resume', { leadId: lead.id });
+  return { ok: true };
 }

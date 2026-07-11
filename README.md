@@ -130,6 +130,44 @@ npm run worker
 | Monitor quality / auto-slow            | `quality.applyQualityThrottle()` (slows, then pauses)       |
 | One clear CTA, personalized            | reply/sequence copy includes name + single CTA + opt-out    |
 
+## Offers & keyword routing (Feature A)
+
+Each **offer** has a name, a price (kobo), a unique **keyword**, and its own
+follow-up sequence (same 7-day structure, per-offer copy with `{name}` `{offer}`
+`{price}` placeholders). When a new lead's first message contains an offer's
+keyword — case-insensitive, punctuation/whitespace-insensitive, so `OFFER1`,
+`offer 1`, and `start offer1` all match `offer1` — the lead is tagged to that
+offer and gets its price and sequence. No match → the lead falls under the
+**Default Offer** and is flagged **unmatched** on the dashboard for manual
+assignment. Existing single-offer leads are backfilled onto the default offer,
+so nothing breaks. Manage offers (create/edit/delete, price, keyword, sequence)
+from the **Offers** tab; `DELETE` reassigns that offer's leads to the default.
+
+Set your click-to-WhatsApp ad's pre-filled message to include the keyword and
+the lead just taps send.
+
+## Payment claims — manual approval (Feature B)
+
+Every inbound is scanned for payment-intent phrases ("paid", "i've paid",
+"done", "sent", "transferred", …; edit the list in
+`src/services/paymentIntent.ts`). A match moves the lead into the
+**Payment Claimed** review column and **pauses** its follow-ups (they're not
+cancelled — the worker skips `PAYMENT_CLAIMED` leads without touching the rows).
+The dashboard shows the name, WhatsApp number, offer, price owed and claim time,
+with one-tap **Approve** / **Reject**:
+
+- **Approve** → lead PAID, follow-ups cancelled, the offer's price recorded as
+  revenue (idempotent — no double count).
+- **Reject** → lead back to ENGAGED, follow-ups resume, no revenue.
+
+A claim is **never** auto-marked paid — approval is always manual.
+
+## Revenue reporting
+
+The **Revenue** tab reports recorded payments (approved manual claims + Paystack
+confirmations) grouped by offer, with a total, for today by default or any date
+range. Every lead and payment shows which offer it belongs to.
+
 ## Webhooks
 
 ### `GET/POST /webhook/whatsapp`

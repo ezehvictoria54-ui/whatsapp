@@ -77,6 +77,9 @@ export const config = {
     sendRatePerSec: int('SEND_RATE_PER_SEC', 10),
     businessName: opt('BUSINESS_NAME', 'Our Store'),
     deliveryDetails: opt('DELIVERY_DETAILS', 'We will send your product/next steps shortly.'),
+    // Price used for the auto-created default offer (kobo). Existing single-offer
+    // leads fall under this offer.
+    defaultOfferPriceKobo: int('DEFAULT_OFFER_PRICE_KOBO', 500_000),
     // When true, the app inserts demo leads on startup (idempotent). Meant as a
     // one-switch way to populate the dashboard from the Railway UI; leave off in
     // real use.
