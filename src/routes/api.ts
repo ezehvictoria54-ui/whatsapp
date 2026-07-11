@@ -23,12 +23,28 @@ const LEAD_WITH_OFFER = `
   o.name       AS offer_name,
   o.price_kobo AS offer_price_kobo`;
 
+// last-activity expression reused by the leads query (max message time or created).
+const LAST_ACTIVITY = `COALESCE((SELECT max(created_at) FROM messages m WHERE m.lead_id = l.id), l.created_at)`;
+
+/**
+ * Parse ?from=YYYY-MM-DD&to=YYYY-MM-DD into an inclusive [start, end] pair of SQL
+ * params (or null → "default to today" handled in each query's COALESCE). This is
+ * the same convention the revenue endpoint uses, so the whole dashboard shares
+ * one date-range language.
+ */
+function rangeParams(q: { from?: string; to?: string }): { from: string | null; to: string | null } {
+  return {
+    from: q.from ? `${q.from}T00:00:00` : null,
+    to: q.to ? `${q.to}T23:59:59.999` : null,
+  };
+}
+
 export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/health', async () => ({ ok: true }));
 
   // ─── Leads table (with filters) ─────────────────────────────────────────────
   app.get<{
-    Querystring: { status?: string; source?: string; offer?: string; unmatched?: string; limit?: string; offset?: string };
+    Querystring: { status?: string; source?: string; offer?: string; unmatched?: string; from?: string; to?: string; limit?: string; offset?: string };
   }>('/api/leads', async (req) => {
     const status = req.query.status ?? null;
     const source = req.query.source ?? null;
@@ -36,10 +52,13 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const unmatched = req.query.unmatched === 'true' ? true : null;
     const limit = Math.min(Number.parseInt(req.query.limit ?? '100', 10) || 100, 500);
     const offset = Number.parseInt(req.query.offset ?? '0', 10) || 0;
+    const { from, to } = rangeParams(req.query);
 
+    // Date filter is on last activity so the list shows leads active in the
+    // selected period (new + still-moving), consistent with the global picker.
     const res = await query(
       `SELECT ${LEAD_WITH_OFFER},
-         COALESCE((SELECT max(created_at) FROM messages m WHERE m.lead_id = l.id), l.created_at) AS last_activity,
+         ${LAST_ACTIVITY} AS last_activity,
          (SELECT count(*)::int FROM messages m WHERE m.lead_id = l.id) AS message_count
        FROM leads l
        LEFT JOIN offers o ON o.id = l.offer_id
@@ -47,9 +66,11 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
          AND ($2::text IS NULL OR l.source = $2)
          AND ($3::uuid IS NULL OR l.offer_id = $3)
          AND ($4::boolean IS NULL OR l.offer_unmatched = $4)
+         AND ${LAST_ACTIVITY} BETWEEN COALESCE($7::timestamp, date_trunc('day', now()))
+                                  AND COALESCE($8::timestamp, now())
        ORDER BY last_activity DESC
        LIMIT $5 OFFSET $6`,
-      [status, source, offer, unmatched, limit, offset],
+      [status, source, offer, unmatched, limit, offset, from, to],
     );
     return { leads: res.rows };
   });
@@ -81,23 +102,42 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  // ─── Top counts ─────────────────────────────────────────────────────────────
-  app.get('/api/stats', async () => {
+  // ─── Top counts (range-aware — driven by the global date picker) ────────────
+  // Every card reflects the selected [from, to] (default: today). Two "live_"
+  // fields stay point-in-time for the always-current review queues.
+  app.get<{ Querystring: { from?: string; to?: string } }>('/api/stats', async (req) => {
     const sendStatus = await getSendStatus();
-    const res = await query(
-      `SELECT
-         (SELECT count(*)::int FROM leads WHERE created_at >= date_trunc('day', now())) AS leads_today,
-         (SELECT count(*)::int FROM messages WHERE direction = 'OUT' AND created_at >= date_trunc('day', now())) AS replies_today,
-         (SELECT count(*)::int FROM payments WHERE created_at >= date_trunc('day', now())) AS conversions_today,
-         (SELECT count(*)::int FROM leads) AS total_leads,
-         (SELECT count(*)::int FROM leads WHERE status = 'NEW') AS new_count,
-         (SELECT count(*)::int FROM leads WHERE status = 'ENGAGED') AS engaged_count,
-         (SELECT count(*)::int FROM leads WHERE status = 'PAID') AS paid_count,
-         (SELECT count(*)::int FROM leads WHERE status = 'OPTED_OUT') AS opted_out_count,
-         (SELECT count(*)::int FROM leads WHERE status = 'PAYMENT_CLAIMED') AS claimed_count,
-         (SELECT count(*)::int FROM leads WHERE offer_unmatched = true AND status NOT IN ('PAID','OPTED_OUT')) AS unmatched_count`,
+    const { from, to } = rangeParams(req.query);
+    const res = await query<{
+      leads: number; replies: number; conversions: number; revenue_kobo: number;
+      claims: number; unmatched: number; opted_out: number; contacted: number;
+      live_claims: number; live_unmatched: number;
+    }>(
+      `WITH r AS (
+         SELECT COALESCE($1::timestamp, date_trunc('day', now())) AS s,
+                COALESCE($2::timestamp, now())                    AS e )
+       SELECT
+         (SELECT count(*)::int  FROM leads, r    WHERE created_at BETWEEN s AND e) AS leads,
+         (SELECT count(*)::int  FROM messages, r WHERE direction='OUT' AND created_at BETWEEN s AND e) AS replies,
+         (SELECT count(*)::int  FROM payments, r WHERE created_at BETWEEN s AND e) AS conversions,
+         (SELECT COALESCE(sum(amount),0)::bigint FROM payments, r WHERE created_at BETWEEN s AND e) AS revenue_kobo,
+         (SELECT count(*)::int  FROM leads, r    WHERE payment_claimed_at BETWEEN s AND e) AS claims,
+         (SELECT count(*)::int  FROM leads, r    WHERE offer_unmatched = true AND status NOT IN ('PAID','OPTED_OUT') AND created_at BETWEEN s AND e) AS unmatched,
+         (SELECT count(*)::int  FROM leads, r    WHERE status='OPTED_OUT' AND updated_at BETWEEN s AND e) AS opted_out,
+         (SELECT count(DISTINCT lead_id)::int FROM messages, r WHERE direction='OUT' AND created_at BETWEEN s AND e) AS contacted,
+         (SELECT count(*)::int  FROM leads WHERE status='PAYMENT_CLAIMED') AS live_claims,
+         (SELECT count(*)::int  FROM leads WHERE offer_unmatched = true AND status NOT IN ('PAID','OPTED_OUT')) AS live_unmatched`,
+      [from, to],
     );
-    return { counts: res.rows[0], optOutRate7d: sendStatus.optOutRate7d, sending: sendStatus };
+    const c = res.rows[0]!;
+    const optOutRate = c.contacted > 0 ? c.opted_out / c.contacted : 0;
+    return {
+      counts: { ...c, revenue_kobo: Number(c.revenue_kobo) },
+      optOutRate,
+      liveClaims: c.live_claims,
+      liveUnmatched: c.live_unmatched,
+      sending: sendStatus,
+    };
   });
 
   // ─── Payment-claim review queue (Feature B) ─────────────────────────────────
