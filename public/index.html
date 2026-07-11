@@ -68,6 +68,11 @@
   .row { display: flex; gap: 12px; } .row .field { flex: 1; }
   .rev-total { font-size: 30px; font-weight: 800; color: var(--paid); }
   .hidden { display: none; }
+  .daterange { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;
+               padding: 10px 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .preset { padding: 6px 12px; border-radius: 20px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
+  .preset.active { background: var(--accent); color: #04110c; border-color: var(--accent); font-weight: 600; }
+  #customRange input { padding: 6px 8px; }
 </style>
 </head>
 <body>
@@ -78,6 +83,22 @@
   <button class="close" style="margin-left:auto" onclick="refreshAll()">↻ Refresh</button>
 </header>
 <main>
+  <!-- GLOBAL date range: controls stat cards, revenue, and the leads list together -->
+  <div class="daterange" id="daterange">
+    <span class="muted" style="margin-right:2px">Period:</span>
+    <button class="preset" data-preset="today" onclick="setPreset('today')">Today</button>
+    <button class="preset" data-preset="yesterday" onclick="setPreset('yesterday')">Yesterday</button>
+    <button class="preset" data-preset="7d" onclick="setPreset('7d')">Last 7 days</button>
+    <button class="preset" data-preset="30d" onclick="setPreset('30d')">Last 30 days</button>
+    <button class="preset" data-preset="custom" onclick="setPreset('custom')">Custom</button>
+    <span id="customRange" class="hidden">
+      <input type="date" id="gFrom" onchange="onCustomChange()">
+      <span class="muted">→</span>
+      <input type="date" id="gTo" onchange="onCustomChange()">
+    </span>
+    <span class="muted" id="rangeLabel" style="margin-left:auto"></span>
+  </div>
+
   <div class="cards" id="cards"></div>
 
   <div class="tabs" id="tabs">
@@ -118,14 +139,9 @@
     <div id="emptyClaims" class="empty hidden">No payment claims awaiting review. 🎉</div>
   </section>
 
-  <!-- REVENUE -->
+  <!-- REVENUE (uses the global date range at the top of the page) -->
   <section id="tab-revenue" class="hidden">
-    <div class="toolbar">
-      <label class="muted">From <input type="date" id="revFrom" onchange="loadRevenue()"></label>
-      <label class="muted">To <input type="date" id="revTo" onchange="loadRevenue()"></label>
-      <button onclick="revToday()">Today</button>
-    </div>
-    <div class="card" style="margin-bottom:16px"><div class="l">Total revenue (range)</div><div class="rev-total" id="revTotal">₦0</div><div class="muted" id="revSub">0 sales</div></div>
+    <div class="card" style="margin-bottom:16px"><div class="l">Total revenue (selected period)</div><div class="rev-total" id="revTotal">₦0</div><div class="muted" id="revSub">0 sales</div></div>
     <table>
       <thead><tr><th>Offer</th><th>Sales</th><th>Revenue</th></tr></thead>
       <tbody id="revRows"></tbody>
@@ -180,6 +196,47 @@ async function j(url, opts) { const r = await fetch(url, opts); return r.json();
 let OFFERS = [];
 let editingOffer = null;
 
+// ── Global date range: drives stat cards, revenue, and the leads list ──────────
+let RANGE = { preset: 'today', from: null, to: null }; // from/to are YYYY-MM-DD
+function ymd(d) { const z = (n) => String(n).padStart(2, '0'); return d.getFullYear() + '-' + z(d.getMonth()+1) + '-' + z(d.getDate()); }
+function daysAgo(n) { const d = new Date(); d.setDate(d.getDate() - n); return ymd(d); }
+function computePreset(preset) {
+  const t = ymd(new Date());
+  if (preset === 'today') return { from: t, to: t };
+  if (preset === 'yesterday') return { from: daysAgo(1), to: daysAgo(1) };
+  if (preset === '7d') return { from: daysAgo(6), to: t };
+  if (preset === '30d') return { from: daysAgo(29), to: t };
+  return { from: RANGE.from || t, to: RANGE.to || t };
+}
+function rangeQuery() { const q = new URLSearchParams(); if (RANGE.from) q.set('from', RANGE.from); if (RANGE.to) q.set('to', RANGE.to); return q; }
+function rangeLabelText() {
+  const names = { today: 'Today', yesterday: 'Yesterday', '7d': 'Last 7 days', '30d': 'Last 30 days' };
+  return names[RANGE.preset] || (RANGE.from === RANGE.to ? RANGE.from : RANGE.from + ' → ' + RANGE.to);
+}
+function setPreset(preset) {
+  RANGE.preset = preset;
+  document.querySelectorAll('.preset').forEach((b) => b.classList.toggle('active', b.dataset.preset === preset));
+  $('customRange').classList.toggle('hidden', preset !== 'custom');
+  if (preset === 'custom') {
+    if (!$('gFrom').value) $('gFrom').value = RANGE.from || computePreset('today').from;
+    if (!$('gTo').value) $('gTo').value = RANGE.to || computePreset('today').to;
+    RANGE.from = $('gFrom').value; RANGE.to = $('gTo').value;
+  } else {
+    const r = computePreset(preset); RANGE.from = r.from; RANGE.to = r.to;
+  }
+  $('rangeLabel').textContent = rangeLabelText();
+  applyRange();
+}
+function onCustomChange() {
+  if (!$('gFrom').value || !$('gTo').value) return;
+  RANGE.preset = 'custom'; RANGE.from = $('gFrom').value; RANGE.to = $('gTo').value;
+  document.querySelectorAll('.preset').forEach((b) => b.classList.toggle('active', b.dataset.preset === 'custom'));
+  $('rangeLabel').textContent = rangeLabelText();
+  applyRange();
+}
+// Update everything the global range controls, together.
+function applyRange() { loadStats(); loadLeads(); loadRevenue(); }
+
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   ['leads','claims','revenue','offers'].forEach(s => $('tab-'+s).classList.toggle('hidden', s !== name));
@@ -189,16 +246,20 @@ function switchTab(name) {
 }
 
 async function loadStats() {
-  const s = await j('/api/stats'); const c = s.counts || {}; const send = s.sending || {};
+  const s = await j('/api/stats?' + rangeQuery()); const c = s.counts || {}; const send = s.sending || {};
+  const rate = ((s.optOutRate || 0) * 100).toFixed(1);
   $('cards').innerHTML = [
-    ['Leads today', c.leads_today], ['Replies today', c.replies_today],
-    ['Claims to review', c.claimed_count, c.claimed_count > 0],
-    ['Paid', c.paid_count], ['Unmatched offers', c.unmatched_count, c.unmatched_count > 0],
-    ['Opt-out rate 7d', (s.optOutRate7d*100).toFixed(1)+'%', s.optOutRate7d >= 0.04],
-    ['Sent today / cap', (send.sentToday??0)+' / '+(send.effectiveCap??0), send.paused],
+    ['Leads', c.leads],
+    ['Messages sent', c.replies],
+    ['Claims', c.claims, c.claims > 0],
+    ['Paid', c.conversions],
+    ['Revenue', naira(c.revenue_kobo)],
+    ['Unmatched offers', c.unmatched, c.unmatched > 0],
+    ['Opt-out rate', rate + '%', s.optOutRate >= 0.04],
   ].map(([l,n,warn]) => `<div class="card ${warn?'warn':''}"><div class="n">${n??0}</div><div class="l">${l}</div></div>`).join('');
-  const pill = $('claimPill'); pill.textContent = c.claimed_count || 0; pill.classList.toggle('hidden', !c.claimed_count);
-  $('pausemsg').textContent = send.paused ? '• SENDING PAUSED (quality)' : '';
+  // Tab pill + pause banner stay live (current state), independent of the date range.
+  const pill = $('claimPill'); pill.textContent = s.liveClaims || 0; pill.classList.toggle('hidden', !s.liveClaims);
+  $('pausemsg').textContent = send.paused ? '• SENDING PAUSED (quality)' : ('Daily cap: ' + (send.effectiveCap ?? 0));
 }
 
 async function loadOffersList() {
@@ -215,7 +276,7 @@ async function loadSources() {
 }
 
 async function loadLeads() {
-  const q = new URLSearchParams();
+  const q = rangeQuery(); // global date range first…
   if ($('fStatus').value) q.set('status', $('fStatus').value);
   if ($('fOffer').value) q.set('offer', $('fOffer').value);
   if ($('fSource').value) q.set('source', $('fSource').value);
@@ -255,14 +316,10 @@ async function decide(id, action) {
   await loadClaims(); await loadStats();
 }
 
-function revToday() { $('revFrom').value=''; $('revTo').value=''; loadRevenue(); }
 async function loadRevenue() {
-  const q = new URLSearchParams();
-  if ($('revFrom').value) q.set('from', $('revFrom').value);
-  if ($('revTo').value) q.set('to', $('revTo').value);
-  const s = await j('/api/revenue?' + q);
+  const s = await j('/api/revenue?' + rangeQuery());
   $('revTotal').textContent = naira(s.totalKobo);
-  $('revSub').textContent = (s.totalSales||0) + ' sales · ' + (s.from==='today'?'today':(s.from+' → '+s.to));
+  $('revSub').textContent = (s.totalSales||0) + ' sales · ' + rangeLabelText();
   const rows = s.byOffer || [];
   $('emptyRev').classList.toggle('hidden', rows.length > 0);
   $('revRows').innerHTML = rows.map(r => `<tr><td>${esc(r.offerName)}</td><td>${r.sales}</td><td>${naira(r.revenueKobo)}</td></tr>`).join('');
@@ -356,8 +413,18 @@ async function assignOffer(id) {
 }
 function closeModal() { $('overlay').classList.remove('open'); }
 
-function refreshAll() { loadStats(); loadSources(); loadOffersList().then(loadLeads); }
-refreshAll();
+function refreshAll() {
+  loadSources();
+  loadOffersList().then(applyRange); // re-apply the current range across the page
+  loadClaims();
+}
+async function init() {
+  await loadSources();
+  await loadOffersList();
+  setPreset('today'); // default to Today on load → applyRange() fills stats, leads, revenue
+}
+init();
+// Keep the live figures fresh for whatever range is selected.
 setInterval(loadStats, 15000);
 </script>
 </body>
