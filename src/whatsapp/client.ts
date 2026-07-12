@@ -51,6 +51,20 @@ export async function sendText(waId: string, body: string): Promise<SendResult> 
   });
 }
 
+/**
+ * Send an image message by URL (Meta fetches the link), with an optional caption.
+ * Only valid inside the window; used for before/after photos on sequence bubbles.
+ */
+export async function sendImage(waId: string, imageUrl: string, caption?: string): Promise<SendResult> {
+  return postToGraph({
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: waId,
+    type: 'image',
+    image: { link: imageUrl, ...(caption ? { caption } : {}) },
+  });
+}
+
 export interface TemplateComponentParam {
   type: 'text';
   text: string;

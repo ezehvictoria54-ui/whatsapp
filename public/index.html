@@ -73,6 +73,15 @@
   .preset { padding: 6px 12px; border-radius: 20px; background: var(--panel2); border: 1px solid var(--line); color: var(--muted); }
   .preset.active { background: var(--accent); color: #04110c; border-color: var(--accent); font-weight: 600; }
   #customRange input { padding: 6px 8px; }
+  .msgimg { display: block; max-width: 200px; max-height: 200px; border-radius: 8px; margin-bottom: 4px; }
+  .stepblock { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; background: var(--panel2); }
+  .stephead { font-size: 12px; color: var(--muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: .3px; }
+  .bubbleedit { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed var(--line); }
+  .bubbleedit textarea { width: 100%; }
+  .bubbleedit .imgrow { display: flex; gap: 6px; align-items: center; }
+  .bubbleedit .imgrow input { flex: 1; }
+  .bubbleedit .imgthumb { width: 34px; height: 34px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); }
+  button.mini { padding: 4px 9px; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -173,8 +182,8 @@
         <div class="field"><label>Name</label><input id="oeName" placeholder="Glow Skincare Set"></div>
         <div class="field"><label>Price (₦)</label><input id="oePrice" type="number" placeholder="12500"></div>
       </div>
-      <div class="field"><label>Keyword (what the ad message includes, e.g. "glow"). Blank = no keyword.</label><input id="oeKeyword" placeholder="glow"></div>
-      <div class="field"><label>Follow-up messages — one per step. {name} {offer} {price} are filled in automatically. Steps 4–6 are template names.</label>
+      <div class="field"><label>Keywords — comma-separated. Case & spaces ignored, so "flat tummy" and "flattummy" both match. Blank = no keyword.</label><input id="oeKeywords" placeholder="interested, flattummy"></div>
+      <div class="field"><label>Follow-up sequence — each step can send several bubbles (separate messages), each with an optional image. {name} {offer} {price} are filled in automatically.</label>
         <div id="oeSteps"></div>
       </div>
       <div style="display:flex; gap:8px; margin-top:8px">
@@ -327,14 +336,28 @@ async function loadRevenue() {
 
 async function loadOffers() {
   await loadOffersList();
-  $('offerRows').innerHTML = OFFERS.map(o => `
+  $('offerRows').innerHTML = OFFERS.map(o => {
+    const kws = (o.keywords && o.keywords.length ? o.keywords : (o.keyword ? [o.keyword] : []));
+    const kwHtml = kws.length ? kws.map(k => '<span class="tag">'+esc(k)+'</span>').join(' ') : '<span class="muted">—</span>';
+    return `
     <tr>
       <td>${esc(o.name)}</td>
-      <td>${o.keyword ? '<span class="tag">'+esc(o.keyword)+'</span>' : '<span class="muted">—</span>'}</td>
+      <td>${kwHtml}</td>
       <td>${naira(o.price_kobo)}</td><td>${o.lead_count}</td>
       <td>${o.is_default ? '✓' : ''}</td>
       <td><button onclick='openOfferEditor(${JSON.stringify(o.id)})'>Edit</button></td>
-    </tr>`).join('');
+    </tr>`; }).join('');
+}
+
+// Normalize a sequence into the editor's working shape: FREEFORM steps carry a
+// `bubbles` array ({body,imageUrl}); TEMPLATE steps carry a templateName.
+function normalizeSeqForEditor(seq) {
+  return (seq||[]).map(s => {
+    if (s.channel === 'TEMPLATE') return { ...s, templateName: s.templateName || '' };
+    let bubbles = (s.bubbles && s.bubbles.length) ? s.bubbles.map(b => ({ body: b.body||'', imageUrl: b.imageUrl||'' }))
+      : (s.freeformBody ? [{ body: s.freeformBody, imageUrl: '' }] : [{ body: '', imageUrl: '' }]);
+    const out = { ...s, bubbles }; delete out.freeformBody; return out;
+  });
 }
 
 async function openOfferEditor(id) {
@@ -343,32 +366,63 @@ async function openOfferEditor(id) {
   $('oeTitle').textContent = editingOffer ? 'Edit offer' : 'New offer';
   $('oeName').value = editingOffer?.name || '';
   $('oePrice').value = editingOffer ? Math.round(editingOffer.price_kobo/100) : '';
-  $('oeKeyword').value = editingOffer?.keyword || '';
+  const kws = editingOffer ? (editingOffer.keywords && editingOffer.keywords.length ? editingOffer.keywords : (editingOffer.keyword ? [editingOffer.keyword] : [])) : [];
+  $('oeKeywords').value = kws.join(', ');
   let seq = editingOffer?.sequence;
   if (!seq || !seq.length) { const t = await j('/api/offers/template'); seq = t.sequence; }
-  window._seq = seq;
-  $('oeSteps').innerHTML = seq.map((s,i) => {
-    const val = s.channel === 'TEMPLATE' ? (s.templateName||'') : (s.freeformBody||'');
-    const lbl = 'Step '+s.step+' · '+s.purpose+(s.channel==='TEMPLATE'?' (template name)':'');
-    return `<label class="muted" style="margin-top:8px;display:block">${esc(lbl)}</label>
-      <textarea data-i="${i}" rows="${s.channel==='TEMPLATE'?1:2}" style="width:100%">${esc(val)}</textarea>`;
-  }).join('');
+  window._seq = normalizeSeqForEditor(seq);
+  renderEditorSteps();
   $('oeDelete').classList.toggle('hidden', !editingOffer || editingOffer.is_default);
   $('oeMsg').textContent = '';
   $('offerOverlay').classList.add('open');
 }
 function closeOfferEditor() { $('offerOverlay').classList.remove('open'); }
 
+function renderEditorSteps() {
+  $('oeSteps').innerHTML = window._seq.map((s, si) => {
+    const head = `<div class="stephead">Step ${s.step} · ${esc(s.purpose||'')}${s.channel==='TEMPLATE'?' · template':''}</div>`;
+    if (s.channel === 'TEMPLATE') {
+      return `<div class="stepblock">${head}<input data-tpl="${si}" placeholder="approved template name" value="${esc(s.templateName||'')}"></div>`;
+    }
+    const bubbles = (s.bubbles||[]).map((b, bi) => {
+      const thumb = b.imageUrl ? `<img class="imgthumb" src="${esc(b.imageUrl)}" onerror="this.style.display='none'">` : '';
+      return `<div class="bubbleedit">
+        <textarea data-s="${si}" data-b="${bi}" rows="3" placeholder="Message text (bubble ${bi+1})">${esc(b.body||'')}</textarea>
+        <div class="imgrow">${thumb}<input data-s="${si}" data-b="${bi}" data-img="1" placeholder="Image URL (optional) — before/after photo" value="${esc(b.imageUrl||'')}">
+          <button class="mini danger" onclick="removeBubble(${si},${bi})" title="remove bubble">✕</button></div>
+      </div>`;
+    }).join('');
+    return `<div class="stepblock">${head}${bubbles}<button class="mini" onclick="addBubble(${si})">+ add bubble</button></div>`;
+  }).join('');
+}
+// Pull current field values back into window._seq before mutating/saving.
+function syncEditorFromDom() {
+  document.querySelectorAll('#oeSteps textarea[data-s]').forEach(t => { window._seq[+t.dataset.s].bubbles[+t.dataset.b].body = t.value; });
+  document.querySelectorAll('#oeSteps input[data-img]').forEach(i => { window._seq[+i.dataset.s].bubbles[+i.dataset.b].imageUrl = i.value.trim(); });
+  document.querySelectorAll('#oeSteps input[data-tpl]').forEach(i => { window._seq[+i.dataset.tpl].templateName = i.value.trim(); });
+}
+function addBubble(si) { syncEditorFromDom(); window._seq[si].bubbles.push({ body: '', imageUrl: '' }); renderEditorSteps(); }
+function removeBubble(si, bi) {
+  syncEditorFromDom(); window._seq[si].bubbles.splice(bi, 1);
+  if (window._seq[si].bubbles.length === 0) window._seq[si].bubbles.push({ body: '', imageUrl: '' });
+  renderEditorSteps();
+}
+
 async function saveOffer() {
-  const seq = JSON.parse(JSON.stringify(window._seq));
-  document.querySelectorAll('#oeSteps textarea').forEach(t => {
-    const s = seq[+t.dataset.i]; const v = t.value.trim();
-    if (s.channel === 'TEMPLATE') s.templateName = v; else s.freeformBody = v;
+  syncEditorFromDom();
+  // Build the sequence to send: keep non-empty bubbles; carry image slots.
+  const seq = window._seq.map(s => {
+    if (s.channel === 'TEMPLATE') return { step: s.step, offsetMs: s.offsetMs, channel: 'TEMPLATE', purpose: s.purpose, templateName: (s.templateName||'').trim() };
+    const bubbles = (s.bubbles||[])
+      .map(b => ({ body: (b.body||'').trim(), imageUrl: (b.imageUrl||'').trim() || null }))
+      .filter(b => b.body || b.imageUrl);
+    return { step: s.step, offsetMs: s.offsetMs, channel: 'FREEFORM', purpose: s.purpose, bubbles };
   });
+  const keywords = $('oeKeywords').value.split(',').map(k => k.trim()).filter(Boolean);
   const body = {
     name: $('oeName').value.trim(),
     priceKobo: Math.round(parseFloat($('oePrice').value||'0') * 100),
-    keyword: $('oeKeyword').value.trim() || null,
+    keywords,
     sequence: seq,
   };
   if (!body.name) { $('oeMsg').textContent = 'Name is required'; return; }
@@ -392,7 +446,11 @@ async function openLead(id) {
   $('mTitle').textContent = (l.name || l.wa_id);
   const offerLine = `${esc(d.offer?.name || '—')} · ${naira(d.offer?.price_kobo || 0)}` + (l.offer_unmatched ? ' <span class="tag unmatched">unmatched — assign an offer</span>' : '');
   const assign = `<select id="assignSel">${OFFERS.map(o=>`<option value="${o.id}" ${o.id===l.offer_id?'selected':''}>${esc(o.name)}</option>`).join('')}</select> <button onclick="assignOffer('${l.id}')">Assign</button>`;
-  const thread = (d.messages||[]).map(m => `<div class="bubble ${m.direction}">${esc(m.body) || '<i>['+m.type+']</i>'}<span class="meta">${m.direction} · ${fmt(m.created_at)}</span></div>`).join('');
+  const thread = (d.messages||[]).map(m => {
+    const img = m.image_url ? `<img class="msgimg" src="${esc(m.image_url)}" alt="attached image" onerror="this.style.display='none'">` : '';
+    const txt = m.body ? esc(m.body) : (m.image_url ? '' : '<i>['+m.type+']</i>');
+    return `<div class="bubble ${m.direction}">${img}${txt}<span class="meta">${m.direction} · ${fmt(m.created_at)}</span></div>`;
+  }).join('');
   const fus = (d.followups||[]).map(f => `<div class="fu"><span>Step ${f.step} · ${f.channel}${f.template_name?' ('+esc(f.template_name)+')':''}</span><span class="muted">${f.status} · ${fmt(f.send_at)}</span></div>`).join('') || '<span class="muted">None</span>';
   const pays = (d.payments||[]).map(p => `<div class="fu"><span>${esc(p.provider)} · ${esc(p.offer_name||'—')}</span><span class="muted">${naira(p.amount)}</span></div>`).join('') || '<span class="muted">None</span>';
   const claimActions = l.status === 'PAYMENT_CLAIMED'

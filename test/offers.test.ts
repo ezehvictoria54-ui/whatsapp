@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalize, canonicalSequence } from '../src/services/offers.js';
+import { normalize, canonicalSequence, stepBubbles } from '../src/services/offers.js';
 import { renderMessage, naira } from '../src/lib/render.js';
+import type { OfferSequenceStep } from '../src/types.js';
 
 test('normalize lowercases and strips non-alphanumerics', () => {
   assert.equal(normalize('OFFER1'), 'offer1');
@@ -33,6 +34,29 @@ test('canonical sequence has the 7 steps with offsets/channels', () => {
   assert.deepEqual(seq.map((s) => s.step), [0, 1, 2, 3, 4, 5, 6]);
   assert.equal(seq[0]!.channel, 'FREEFORM');
   assert.equal(seq[6]!.channel, 'TEMPLATE');
+});
+
+test('multi-word keyword matches with or without a space', () => {
+  const match = (body: string, keyword: string) => normalize(body).includes(normalize(keyword));
+  assert.equal(match('flat tummy', 'flattummy'), true);
+  assert.equal(match('flattummy', 'flattummy'), true);
+  assert.equal(match('FLAT TUMMY!', 'flattummy'), true);
+  assert.equal(match('I am interested please', 'interested'), true);
+  assert.equal(match('nothing here', 'flattummy'), false);
+});
+
+test('stepBubbles: explicit bubbles win, freeformBody is a one-bubble fallback, empties dropped', () => {
+  const multi: OfferSequenceStep = {
+    step: 0, offsetMs: 0, channel: 'FREEFORM', purpose: 'x',
+    bubbles: [{ body: 'a' }, { imageUrl: 'http://img' }, { body: '' }, { body: '  ', imageUrl: '' }],
+  };
+  assert.equal(stepBubbles(multi).length, 2); // 'a' + image bubble; blanks dropped
+
+  const legacy: OfferSequenceStep = { step: 1, offsetMs: 0, channel: 'FREEFORM', purpose: 'x', freeformBody: 'hello' };
+  assert.deepEqual(stepBubbles(legacy), [{ body: 'hello' }]);
+
+  const template: OfferSequenceStep = { step: 4, offsetMs: 0, channel: 'TEMPLATE', purpose: 'x', templateName: 't' };
+  assert.equal(stepBubbles(template).length, 0);
 });
 
 test('renderMessage fills placeholders', () => {

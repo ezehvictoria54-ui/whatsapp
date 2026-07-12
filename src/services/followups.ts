@@ -1,6 +1,7 @@
 import { query, type Queryable } from '../db/pool.js';
-import type { Channel, Followup, OfferSequenceStep } from '../types.js';
+import type { Bubble, Channel, Followup, OfferSequenceStep } from '../types.js';
 import { renderMessage, type RenderContext } from '../lib/render.js';
+import { stepBubbles } from './offers.js';
 
 type Db = Queryable;
 
@@ -52,12 +53,18 @@ export async function scheduleSequence(
     if (step.step < 1) continue; // step 0 is the instant reply, not a worker followup
     const sendAt = new Date(firstContact.getTime() + step.offsetMs);
     const { channel, templateName } = resolveChannel(step, sendAt, windowExpiresAt);
-    const body = step.freeformBody ? renderMessage(step.freeformBody, ctx) : null;
+    // Render each bubble's body (placeholders) and carry its image slot forward.
+    const bubbles: Bubble[] = stepBubbles(step).map((b) => ({
+      body: b.body ? renderMessage(b.body, ctx) : null,
+      imageUrl: b.imageUrl ?? null,
+    }));
+    const body = bubbles[0]?.body ?? null; // legacy/compat + quick display
     const res = await db.query(
-      `INSERT INTO followups (lead_id, send_at, step, channel, template_name, body)
-       VALUES ($1, $2, $3, $4, $5, $6)
+      `INSERT INTO followups (lead_id, send_at, step, channel, template_name, body, bubbles)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
        ON CONFLICT (lead_id, step) DO NOTHING`,
-      [leadId, sendAt.toISOString(), step.step, channel, templateName, body],
+      [leadId, sendAt.toISOString(), step.step, channel, templateName, body,
+       bubbles.length ? JSON.stringify(bubbles) : null],
     );
     inserted += res.rowCount ?? 0;
   }

@@ -12,16 +12,26 @@ function fu(partial: Partial<Followup>): Followup {
     channel: 'FREEFORM',
     template_name: null,
     body: null,
+    bubbles: null,
     status: 'PENDING',
     created_at: new Date().toISOString(),
     ...partial,
   };
 }
 
-test('freeform + window open -> sends the step body', () => {
+test('freeform + window open -> sends the step bubbles', () => {
   const a = resolveSendAction(fu({ step: 1, channel: 'FREEFORM' }), true);
   assert.equal(a.kind, 'freeform');
-  assert.ok(a.body && a.body.length > 0);
+  assert.ok(a.bubbles && a.bubbles.length > 0 && a.bubbles[0]!.body);
+});
+
+test('freeform with multiple stored bubbles -> sends them all', () => {
+  const a = resolveSendAction(
+    fu({ step: 1, channel: 'FREEFORM', bubbles: [{ body: 'one' }, { body: 'two' }, { imageUrl: 'http://x/img.jpg' }] }),
+    true,
+  );
+  assert.equal(a.kind, 'freeform');
+  assert.equal(a.bubbles!.length, 3);
 });
 
 test('freeform step 1 + window closed + no fallback -> skip', () => {

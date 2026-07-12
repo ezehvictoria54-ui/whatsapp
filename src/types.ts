@@ -20,12 +20,23 @@ export interface Lead {
   updated_at: string;
 }
 
-/** A single step in an offer's follow-up sequence (same shape as the canonical one). */
+/** One WhatsApp bubble: a text body and/or an attached image. */
+export interface Bubble {
+  body?: string | null;
+  imageUrl?: string | null;
+}
+
+/**
+ * A single step in an offer's follow-up sequence. A FREEFORM step may send
+ * several `bubbles` (2–3 separate messages with a short gap). `freeformBody` is
+ * the legacy single-message form and is treated as a one-bubble step.
+ */
 export interface OfferSequenceStep {
   step: number;
   offsetMs: number;
   channel: Channel;
   purpose: string;
+  bubbles?: Bubble[];
   freeformBody?: string;
   templateName?: string;
 }
@@ -35,6 +46,7 @@ export interface Offer {
   name: string;
   price_kobo: number;
   keyword: string | null;
+  keywords: string[];
   sequence: OfferSequenceStep[];
   is_default: boolean;
   active: boolean;
@@ -49,6 +61,7 @@ export interface Message {
   direction: Direction;
   body: string | null;
   type: string;
+  image_url: string | null;
   created_at: string;
 }
 
@@ -60,6 +73,7 @@ export interface Followup {
   channel: Channel;
   template_name: string | null;
   body: string | null;
+  bubbles: Bubble[] | null;
   status: FollowupStatus;
   created_at: string;
 }

@@ -15,7 +15,48 @@ import { ensureDefaultOffer, canonicalSequence } from '../services/offers.js';
  * repeatedly without piling up duplicates. It only ever touches its own rows.
  */
 
-type OfferKey = 'default' | 'glow' | 'fit';
+type OfferKey = 'default' | 'glow' | 'fit' | 'flattummy';
+
+// Reusable payment CTA that closes each Flat Tummy day.
+const FLAT_TUMMY_CTA =
+  'Get the full guide for just ₦5,500 today. See bank details below 👇\n' +
+  '🏦 Access Bank · 1444169687 · Victoria Oluchi Ezeh\n' +
+  'Send your proof of payment with the word PAID, and I’ll send everything to you immediately. 🤍';
+
+/** The Flat Tummy Guide 7-day sequence: Day 1 is 3 bubbles, Days 2–7 one each. */
+function flatTummySequence(): OfferSequenceStep[] {
+  const DAY_MS = 86_400_000;
+  const img = () => null; // image slot per bubble — filled in from the dashboard later
+  const freeform = (step: number, offsetDays: number, purpose: string, bodies: string[]): OfferSequenceStep => ({
+    step, offsetMs: offsetDays * DAY_MS, channel: 'FREEFORM', purpose,
+    bubbles: bodies.map((body) => ({ body, imageUrl: img() })),
+  });
+  return [
+    freeform(0, 0, 'Day 1 — story + offer (3 bubbles)', [
+      'Mama, I’m so happy you reached out. 🤍\nThat belly that stayed after your baby — whether your last child is 6 months or 15 years — I know it well. I carried mine for 3 years. I hid in boubou, stopped looking in the mirror, even stopped wanting my husband to see me.',
+      'I spent ₦187,000 on teas, waist trainers, gym and supplements — one even landed me in hospital. Nothing worked.\nWhat finally flattened my tummy in 14 days was simple: drinks I make in my own kitchen with market ingredients, my normal Nigerian food (rice, eba, egusi, plantain), and under 10 minutes of gentle movement at home. No gym, no starving.',
+      'I put everything into one simple guide — the drinks, a full meal plan of normal Nigerian food, and gentle exercises (safe for C-section and breastfeeding mamas), plus bonuses.\nAnd if it doesn’t work, you get every naira back within 14 days — the risk is on me, not you. 🤍\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(1, 1, 'Day 2 — not a tea/detox', [
+      'Mama, this is not a slimming tea or detox. 🤍\nIt’s a simple guide showing you drinks you make in your own kitchen and the normal Nigerian food you can still eat — rice, eba, egusi, everything. In 14 days you see a big difference. And if it doesn’t work, every naira back within 14 days — the risk is on me.\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(2, 2, 'Day 3 — works even years later', [
+      'Some mamas say ‘my last born is 10 years old, it won’t work for me.’ It still works, mama — mine was 3 years stubborn. 🤍\nThe guide shows you the drinks to make at home and the food to eat (your normal food), and in 14 days your tummy changes. No gym, no starving. And if it doesn’t work, every naira back within 14 days — the risk is on me.\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(3, 3, 'Day 4 — confidence', [
+      'The hardest part for me wasn’t the belly — it was hiding from my own husband, turning off the light. 😔 When my tummy came back, my confidence came back too.\nYou deserve that, mama. It’s simple: drinks you make at home, food you already eat, a flatter tummy in 14 days. And if it doesn’t work, every naira back within 14 days — the risk is on me.\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(4, 4, 'Day 5 — money wasted before', [
+      'Mama, think of all the money gone already — teas, trainers, supplements. I wasted ₦187,000 before I found this. 😔\nThis is ₦5,500 once — simple drinks from your kitchen, your normal food, a flatter tummy in 14 days. And if it doesn’t work, you get every naira back within 14 days. The only way to lose is to keep paying for things that fail.\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(5, 5, 'Day 6 — remove fear / guarantee', [
+      'Let me take away your fear, mama. 🤍\nGet the guide. Make the drinks in your kitchen, eat your normal food. If in 14 days your tummy hasn’t changed, message me and I give you every naira back. No story. All the risk is on me.\n' + FLAT_TUMMY_CTA,
+    ]),
+    freeform(6, 6, 'Day 7 — last chance / price rises', [
+      'Mama, my last message on this. 🤍\n₦5,500 won’t last — it goes back to ₦15,000 soon. For this small money you get the drinks to make at home, the food to eat, and a real difference in 14 days. And even then, if it doesn’t work, every naira back within 14 days. Don’t pay triple later for what you can start today.\n' + FLAT_TUMMY_CTA,
+    ]),
+  ];
+}
 
 /** Build a per-offer sequence from the canonical one with a custom welcome/CTA. */
 function offerSeq(welcome: string, cta: string): OfferSequenceStep[] {
@@ -30,16 +71,23 @@ function offerSeq(welcome: string, cta: string): OfferSequenceStep[] {
 interface SeedOffer {
   key: Exclude<OfferKey, 'default'>;
   name: string;
-  keyword: string;
+  keywords: string[];
   priceKobo: number;
   sequence: OfferSequenceStep[];
 }
 
 const SEED_OFFERS: SeedOffer[] = [
   {
+    key: 'flattummy',
+    name: 'Flat Tummy Guide',
+    keywords: ['interested', 'flattummy'],
+    priceKobo: 550_000, // ₦5,500
+    sequence: flatTummySequence(),
+  },
+  {
     key: 'glow',
     name: 'Glow Skincare Set',
-    keyword: 'glow',
+    keywords: ['glow'],
     priceKobo: 1_250_000, // ₦12,500
     sequence: offerSeq(
       'Hi {name}! 🌟 Thanks for your interest in the {offer}. It\'s {price} for the full routine. Want me to set up your order? Reply STOP to opt out anytime.',
@@ -49,7 +97,7 @@ const SEED_OFFERS: SeedOffer[] = [
   {
     key: 'fit',
     name: 'FitPro 8-Week Plan',
-    keyword: 'fit',
+    keywords: ['fit'],
     priceKobo: 1_800_000, // ₦18,000
     sequence: offerSeq(
       'Hi {name}! 💪 Thanks for asking about the {offer}. It\'s {price} and includes workouts + a meal guide. Want in? Reply STOP to opt out anytime.',
@@ -57,6 +105,9 @@ const SEED_OFFERS: SeedOffer[] = [
     ),
   },
 ];
+
+const FT_SEQ = flatTummySequence();
+const FT_DAY1 = (FT_SEQ[0]!.bubbles ?? []).map((b) => b.body ?? '');
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -280,6 +331,28 @@ const LEADS: SeedLead[] = [
       { step: 2, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(2 * HOUR) },
     ],
   },
+
+  // ── Flat Tummy Guide demo lead — just arrived via the "interested" keyword ───
+  {
+    wa_id: '2348000000013', name: 'Mama Adaeze', status: 'NEW', entry_point: 'ad',
+    offerKey: 'flattummy', source: 'AD_FLAT_TUMMY', sequence_step: 0, createdAgoMs: 15 * 60 * 1000,
+    windowExpiresAtMs: -(72 * HOUR - 15 * 60 * 1000),
+    messages: [
+      { direction: 'IN', body: 'interested', atMs: 15 * 60 * 1000 },
+      { direction: 'OUT', body: FT_DAY1[0] ?? '', atMs: 14 * 60 * 1000 },
+      { direction: 'OUT', body: FT_DAY1[1] ?? '', atMs: 14 * 60 * 1000 - 4000 },
+      { direction: 'OUT', body: FT_DAY1[2] ?? '', atMs: 14 * 60 * 1000 - 8000 },
+    ],
+    // Days 2–7 scheduled and pending (one per day).
+    followups: [
+      { step: 1, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(1 * DAY) },
+      { step: 2, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(2 * DAY) },
+      { step: 3, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(3 * DAY) },
+      { step: 4, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(4 * DAY) },
+      { step: 5, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(5 * DAY) },
+      { step: 6, channel: 'FREEFORM', status: 'PENDING', sendAtMs: -(6 * DAY) },
+    ],
+  },
 ];
 
 export async function seedDatabase(): Promise<void> {
@@ -291,16 +364,16 @@ export async function seedDatabase(): Promise<void> {
 
   // Offers: ensure the default exists, then upsert the keyworded seed offers.
   const defaultOffer = await ensureDefaultOffer();
-  const offerIdByKey: Record<OfferKey, string> = { default: defaultOffer.id, glow: '', fit: '' };
+  const offerIdByKey: Record<OfferKey, string> = { default: defaultOffer.id, glow: '', fit: '', flattummy: '' };
   for (const o of SEED_OFFERS) {
     const res = await query<{ id: string }>(
-      `INSERT INTO offers (name, price_kobo, keyword, sequence, active)
-       VALUES ($1,$2,$3,$4::jsonb,true)
+      `INSERT INTO offers (name, price_kobo, keyword, keywords, sequence, active)
+       VALUES ($1,$2,$3,$4::text[],$5::jsonb,true)
        ON CONFLICT (keyword) WHERE keyword IS NOT NULL DO UPDATE SET
          name = EXCLUDED.name, price_kobo = EXCLUDED.price_kobo,
-         sequence = EXCLUDED.sequence, updated_at = now()
+         keywords = EXCLUDED.keywords, sequence = EXCLUDED.sequence, updated_at = now()
        RETURNING id`,
-      [o.name, o.priceKobo, o.keyword, JSON.stringify(o.sequence)],
+      [o.name, o.priceKobo, o.keywords[0], o.keywords, JSON.stringify(o.sequence)],
     );
     offerIdByKey[o.key] = res.rows[0]!.id;
   }
