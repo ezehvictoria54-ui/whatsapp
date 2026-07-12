@@ -220,7 +220,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/offers/template', async () => ({ sequence: canonicalSequence() }));
 
-  app.post<{ Body: { name?: string; priceKobo?: number; keyword?: string | null; sequence?: OfferSequenceStep[]; active?: boolean } }>(
+  app.post<{ Body: { name?: string; priceKobo?: number; keyword?: string | null; keywords?: string[]; sequence?: OfferSequenceStep[]; active?: boolean } }>(
     '/api/offers',
     async (req, reply) => {
       const b = req.body ?? {};
@@ -231,6 +231,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         const offer = await createOffer({
           name: b.name,
           priceKobo: b.priceKobo,
+          keywords: b.keywords,
           keyword: b.keyword ?? null,
           sequence: b.sequence,
           active: b.active,
@@ -242,7 +243,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  app.put<{ Params: { id: string }; Body: Partial<{ name: string; priceKobo: number; keyword: string | null; sequence: OfferSequenceStep[]; active: boolean }> }>(
+  app.put<{ Params: { id: string }; Body: Partial<{ name: string; priceKobo: number; keyword: string | null; keywords: string[]; sequence: OfferSequenceStep[]; active: boolean }> }>(
     '/api/offers/:id',
     async (req, reply) => {
       try {

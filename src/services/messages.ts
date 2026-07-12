@@ -15,6 +15,7 @@ export interface LogMessageInput {
   body: string | null;
   type?: string;
   waMessageId?: string | null;
+  imageUrl?: string | null;
 }
 
 /**
@@ -24,11 +25,11 @@ export interface LogMessageInput {
  */
 export async function logMessage(input: LogMessageInput, db: Db = { query }): Promise<Message | null> {
   const res = await db.query<Message>(
-    `INSERT INTO messages (lead_id, direction, body, type, wa_message_id)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO messages (lead_id, direction, body, type, wa_message_id, image_url)
+     VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (wa_message_id) DO NOTHING
      RETURNING *`,
-    [input.leadId, input.direction, input.body, input.type ?? 'text', input.waMessageId ?? null],
+    [input.leadId, input.direction, input.body, input.type ?? 'text', input.waMessageId ?? null, input.imageUrl ?? null],
   );
   return res.rows[0] ?? null;
 }

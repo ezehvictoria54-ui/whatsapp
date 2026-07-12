@@ -11,28 +11,37 @@ import { scheduleSequence, cancelPendingFollowups } from './followups.js';
 import { isOptOut } from './optout.js';
 import { isPaymentClaim } from './paymentIntent.js';
 import { claimPayment } from './payments.js';
-import { matchOfferByKeyword, getDefaultOffer, offerSequence, canonicalSequence } from './offers.js';
-import { sendFreeformToLead } from './outbound.js';
+import { matchOfferByKeyword, getDefaultOffer, offerSequence, canonicalSequence, stepBubbles } from './offers.js';
+import { sendFreeformToLead, sendBubblesToLead } from './outbound.js';
 import { generateAiReply, ensureOptOut } from '../ai/reply.js';
 import { renderMessage } from '../lib/render.js';
 import { isWindowOpen } from '../lib/window.js';
+import type { Bubble } from '../types.js';
 
 const OPT_OUT_CONFIRMATION =
   "You're unsubscribed and won't get further messages from us. " +
   'Thanks — reply anytime if you change your mind.';
 
-/** Welcome copy: the offer's step-0 body (rendered), else a generic fallback. */
-function welcomeFor(offer: Offer | null, name: string | null): string {
+/**
+ * Welcome bubbles: the offer's step-0 bubbles (rendered), else a generic
+ * fallback. The opt-out line is appended once, to the last text bubble.
+ */
+function welcomeBubbles(offer: Offer | null, name: string | null): Bubble[] {
+  const ctx = { name, offerName: offer?.name, priceKobo: offer?.price_kobo };
   const step0 = offer ? offerSequence(offer).find((s) => s.step === 0) : undefined;
-  if (step0?.freeformBody) {
-    return ensureOptOut(
-      renderMessage(step0.freeformBody, { name, offerName: offer?.name, priceKobo: offer?.price_kobo }),
-    );
+  let bubbles: Bubble[] = (step0 ? stepBubbles(step0) : []).map((b) => ({
+    body: b.body ? renderMessage(b.body, ctx) : null,
+    imageUrl: b.imageUrl ?? null,
+  }));
+  if (bubbles.length === 0) {
+    const greeting = name ? `Hi ${name.split(' ')[0]}! ` : 'Hi there! ';
+    bubbles = [{
+      body: `${greeting}Thanks for reaching out 🙌 Tell me what you're looking for and I'll help you sort it out right away.`,
+    }];
   }
-  const greeting = name ? `Hi ${name.split(' ')[0]}! ` : 'Hi there! ';
-  return ensureOptOut(
-    `${greeting}Thanks for reaching out 🙌 Tell me what you're looking for and I'll help you sort it out right away.`,
-  );
+  const lastText = [...bubbles].reverse().find((b) => b.body);
+  if (lastText?.body) lastText.body = ensureOptOut(lastText.body);
+  return bubbles;
 }
 
 export interface InboundOutcome {
@@ -142,8 +151,8 @@ export async function processInbound(parsed: ParsedInbound): Promise<InboundOutc
   let replied = false;
   if (windowOpen) {
     const aiReply = config.ai.enabled ? await generateAiReply(parsed.body, lead.name) : null;
-    const body = aiReply ?? welcomeFor(resolvedOffer, lead.name);
-    replied = await safeSend(() => sendFreeformToLead(lead.id, lead.wa_id, body));
+    const bubbles: Bubble[] = aiReply ? [{ body: aiReply }] : welcomeBubbles(resolvedOffer, lead.name);
+    replied = await safeSend(async () => { await sendBubblesToLead(lead.id, lead.wa_id, bubbles); });
   } else {
     log.warn('window closed on inbound — skipping instant reply', { leadId: lead.id });
   }

@@ -1,7 +1,7 @@
 import { query, type Queryable } from '../db/pool.js';
 import { config } from '../config.js';
 import { log } from '../logger.js';
-import type { Offer, OfferSequenceStep } from '../types.js';
+import type { Bubble, Offer, OfferSequenceStep } from '../types.js';
 import { SEQUENCE } from '../sequence.js';
 
 type Db = Queryable;
@@ -33,6 +33,25 @@ export function offerSequence(offer: Offer): OfferSequenceStep[] {
   return offer.sequence && offer.sequence.length > 0 ? offer.sequence : canonicalSequence();
 }
 
+/**
+ * The bubbles a step sends: its explicit `bubbles`, or the legacy single
+ * `freeformBody` as one bubble. Empty bodies with no image are dropped.
+ */
+export function stepBubbles(step: OfferSequenceStep): Bubble[] {
+  const raw = step.bubbles && step.bubbles.length > 0
+    ? step.bubbles
+    : step.freeformBody
+      ? [{ body: step.freeformBody }]
+      : [];
+  return raw.filter((b) => (b.body && b.body.trim() !== '') || (b.imageUrl && b.imageUrl.trim() !== ''));
+}
+
+/** The offer's active keyword list (array column, or the legacy single keyword). */
+export function offerKeywords(offer: Offer): string[] {
+  if (offer.keywords && offer.keywords.length > 0) return offer.keywords;
+  return offer.keyword ? [offer.keyword] : [];
+}
+
 export async function listOffers(db: Db = { query }): Promise<Offer[]> {
   const res = await db.query<Offer>('SELECT * FROM offers ORDER BY is_default DESC, name ASC');
   return res.rows;
@@ -58,13 +77,21 @@ export async function matchOfferByKeyword(body: string, db: Db = { query }): Pro
   const norm = normalize(body);
   if (!norm) return null;
   const res = await db.query<Offer>(
-    `SELECT * FROM offers WHERE active = true AND keyword IS NOT NULL AND keyword <> ''
-     ORDER BY length(keyword) DESC`,
+    `SELECT * FROM offers
+     WHERE active = true AND (cardinality(keywords) > 0 OR (keyword IS NOT NULL AND keyword <> ''))`,
   );
+  // Collect every (offer, matched-keyword) pair, then pick the longest keyword
+  // so a more specific keyword ("flattummy") beats a broader one ("flat").
+  let best: { offer: Offer; len: number } | null = null;
   for (const offer of res.rows) {
-    if (offer.keyword && norm.includes(offer.keyword)) return offer;
+    for (const kw of offerKeywords(offer)) {
+      const k = normalize(kw);
+      if (k && norm.includes(k) && (!best || k.length > best.len)) {
+        best = { offer, len: k.length };
+      }
+    }
   }
-  return null;
+  return best?.offer ?? null;
 }
 
 /**
@@ -76,8 +103,8 @@ export async function ensureDefaultOffer(): Promise<Offer> {
   let def = existing;
   if (!def) {
     const res = await query<Offer>(
-      `INSERT INTO offers (name, price_kobo, keyword, sequence, is_default, active)
-       VALUES ($1, $2, NULL, $3::jsonb, true, true)
+      `INSERT INTO offers (name, price_kobo, keyword, keywords, sequence, is_default, active)
+       VALUES ($1, $2, NULL, '{}', $3::jsonb, true, true)
        RETURNING *`,
       ['Default Offer', config.app.defaultOfferPriceKobo, JSON.stringify(canonicalSequence())],
     );
@@ -93,20 +120,34 @@ export async function ensureDefaultOffer(): Promise<Offer> {
 export interface OfferInput {
   name: string;
   priceKobo: number;
-  keyword: string | null;
+  keywords?: string[]; // preferred — multiple keywords per offer
+  keyword?: string | null; // legacy single keyword
   sequence?: OfferSequenceStep[];
   active?: boolean;
 }
 
+/** Normalize + de-dupe an offer's keyword list from either input form. */
+function resolveKeywords(input: Pick<OfferInput, 'keywords' | 'keyword'>): string[] {
+  const raw = input.keywords ?? (input.keyword != null ? [input.keyword] : []);
+  const out: string[] = [];
+  for (const k of raw) {
+    const n = normalize(k);
+    if (n && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
 export async function createOffer(input: OfferInput, db: Db = { query }): Promise<Offer> {
+  const keywords = resolveKeywords(input);
   const res = await db.query<Offer>(
-    `INSERT INTO offers (name, price_kobo, keyword, sequence, active)
-     VALUES ($1, $2, $3, $4::jsonb, $5)
+    `INSERT INTO offers (name, price_kobo, keyword, keywords, sequence, active)
+     VALUES ($1, $2, $3, $4::text[], $5::jsonb, $6)
      RETURNING *`,
     [
       input.name,
       input.priceKobo,
-      input.keyword ? normalize(input.keyword) : null,
+      keywords[0] ?? null, // legacy column = first keyword
+      keywords,
       JSON.stringify(input.sequence ?? canonicalSequence()),
       input.active ?? true,
     ],
@@ -119,13 +160,16 @@ export async function updateOffer(
   patch: Partial<OfferInput>,
   db: Db = { query },
 ): Promise<Offer | null> {
+  const touchKeywords = patch.keywords !== undefined || patch.keyword !== undefined;
+  const keywords = touchKeywords ? resolveKeywords(patch) : [];
   const res = await db.query<Offer>(
     `UPDATE offers SET
        name       = COALESCE($2, name),
        price_kobo = COALESCE($3, price_kobo),
        keyword    = CASE WHEN $4::boolean THEN $5 ELSE keyword END,
-       sequence   = COALESCE($6::jsonb, sequence),
-       active     = COALESCE($7, active),
+       keywords   = CASE WHEN $4::boolean THEN $6::text[] ELSE keywords END,
+       sequence   = COALESCE($7::jsonb, sequence),
+       active     = COALESCE($8, active),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
@@ -133,8 +177,9 @@ export async function updateOffer(
       id,
       patch.name ?? null,
       patch.priceKobo ?? null,
-      patch.keyword !== undefined, // whether to touch keyword at all
-      patch.keyword ? normalize(patch.keyword) : null,
+      touchKeywords,
+      keywords[0] ?? null,
+      keywords,
       patch.sequence ? JSON.stringify(patch.sequence) : null,
       patch.active ?? null,
     ],
